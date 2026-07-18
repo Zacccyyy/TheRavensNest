@@ -210,6 +210,47 @@ def test_c4_health_flags_legacy_assets_with_gps(data_dir):
     assert flagged == ["ab" * 32 + ".jpg"]
 
 
+def test_c4_followup_vision_api_receives_sanitized_bytes(data_dir, monkeypatch):
+    """Audit C4 follow-up: the payload sent to the Anthropic API must be
+    the same EXIF-stripped bytes that get stored — GPS never leaves the
+    machine inside the capture request either."""
+    import base64
+    import io
+    import json as json_module
+
+    from PIL import Image
+
+    from ravens_nest import ingest, vision
+
+    captured_payloads = []
+
+    def fake_call_model(messages):
+        captured_payloads.append(messages[0]["content"][0]["source"]["data"])
+        return json_module.dumps(
+            {
+                "items": [
+                    {
+                        "name": {"value": "Widget", "confidence": "high"},
+                        "unit_type": {"value": "each", "confidence": "high"},
+                        "questions": [],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(vision, "_call_model", fake_call_model)
+    result = ingest.ingest_photo(_jpeg_with_exif())
+
+    assert len(captured_payloads) == 1
+    sent_bytes = base64.standard_b64decode(captured_payloads[0])
+    sent_image = Image.open(io.BytesIO(sent_bytes))
+    assert len(sent_image.getexif()) == 0  # no EXIF at all in the API payload
+    assert len(sent_image.getexif().get_ifd(0x8825)) == 0  # GPS specifically
+    assert sent_image.format == "JPEG"  # still valid image data for the model
+    # And it is byte-identical to what got hashed and stored.
+    assert sent_bytes == ingest.asset_path(result["photo_hash"]).read_bytes()
+
+
 # ------------------------------------------------------------------ C3
 
 

@@ -55,13 +55,18 @@ def sanitize_image(data: bytes) -> bytes:
         return data
 
 
-def store_asset(data: bytes) -> tuple[str, bool]:
+def store_asset(data: bytes, *, sanitized: bool = False) -> tuple[str, bool]:
     """Sanitize (EXIF stripped) and store a photo content-addressed.
     Returns (sha256, already_existed). The hash is of the SANITIZED
     bytes, so the same source photo re-uploaded still deduplicates.
     Existing assets from before EXIF stripping are left untouched —
-    the health dashboard flags any that still carry GPS."""
-    data = sanitize_image(data)
+    the health dashboard flags any that still carry GPS.
+
+    sanitized=True means the caller already ran sanitize_image (so the
+    same clean bytes can be shared with the vision call — audit C4
+    follow-up: the ORIGINAL bytes must never leave the machine)."""
+    if not sanitized:
+        data = sanitize_image(data)
     photo_hash = hashlib.sha256(data).hexdigest()
     path = asset_path(photo_hash)
     if path.exists():
@@ -141,7 +146,11 @@ def ingest_photo(data: bytes) -> dict[str, Any]:
     Returns {"photo_hash", "status", "cards"} where status is "new",
     "duplicate_pending" (cards already queued), or "already_cataloged"
     (an item already carries this photo)."""
-    photo_hash, _ = store_asset(data)
+    # Sanitize ONCE, up front: the same EXIF-stripped, re-encoded bytes
+    # are hashed, stored, AND sent to the vision API — the original
+    # (potentially GPS-tagged) bytes never leave this function.
+    data = sanitize_image(data)
+    photo_hash, _ = store_asset(data, sanitized=True)
 
     existing = cards_for_photo(photo_hash)
     if existing:
