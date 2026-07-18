@@ -103,7 +103,10 @@ class SyncManager:
         self.last_push: OpResult | None = None
         self.last_apply: dict[str, Any] | None = None
         self.last_error: str | None = None
-        self._lock = threading.RLock()  # serializes all git + cache operations
+        # The shared event-file lock (audit C1): every sync operation that
+        # can rewrite an event file must exclude append_to_log, so this IS
+        # events._write_lock rather than a private lock.
+        self._lock = events._write_lock
         self._timer: threading.Timer | None = None
         self._timer_lock = threading.Lock()
 

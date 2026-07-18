@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from . import config
+
+# THE process-wide event-file lock (audit C1). Appending an event and any
+# git operation that can rewrite an event file (pull/rebase/union merge)
+# must hold this same lock, or a checkout can silently eat an append.
+# SyncManager adopts this as its own lock rather than inventing a second.
+_write_lock = threading.RLock()
 
 EVENT_TYPES = frozenset(
     {
@@ -58,17 +65,25 @@ def new_event(type: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def append_to_log(event: dict[str, Any]) -> None:
-    """Append one event to the log file for its timestamp's month."""
+    """Append one event to the log file for its timestamp's month.
+
+    Serialised against sync's file rewrites via _write_lock (audit C1)."""
     month = event["ts"][:7]  # "YYYY-MM" prefix of the ISO8601 timestamp
     path = config.events_dir() / f"{month}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    with path.open("a", encoding="utf-8", newline="\n") as f:
-        f.write(line + "\n")
+    with _write_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(line + "\n")
 
 
 def read_all_events() -> list[dict[str, Any]]:
     """All events from every log file, sorted by (ts, id) for deterministic replay."""
+    with _write_lock:
+        return _read_all_events_locked()
+
+
+def _read_all_events_locked() -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     directory = config.events_dir()
     if directory.is_dir():
