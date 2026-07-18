@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import csv
 import io
+import logging
 import re
 import zipfile
 from decimal import Decimal, InvalidOperation
@@ -28,6 +29,8 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from . import config, db, merge, store, ui_command
 from .locations import InvalidLocationId, parse_location_id
 from .movement import _ensure_location
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -219,6 +222,13 @@ def apply_row(row: dict[str, Any], decision: str) -> str:
                 store.add_alias(item_id, alias)
         outcome = "updated"
     if row["supplier_url"]:
+        from . import pricing
+
+        try:
+            pricing.validate_link_url(row["supplier_url"], resolve=False)
+        except ValueError as exc:
+            log.warning("skipping supplier_url on row %s: %s", row["row_no"], exc)
+            return outcome
         conn = db.connect()
         try:
             supplier_id = _supplier_for_url(conn, row["supplier_url"])

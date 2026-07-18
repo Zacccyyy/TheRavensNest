@@ -10,12 +10,16 @@ never invented, never estimated.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import os
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -26,8 +30,67 @@ FETCH_TIMEOUT = 10.0
 MAX_PARALLEL_FETCHES = 6
 
 
+def _allow_hosts() -> set[str]:
+    raw = os.environ.get("RAVENS_NEST_FETCH_ALLOW_HOSTS", "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _check_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, host: str) -> None:
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise ValueError(
+            f"refusing to fetch {host!r}: it resolves to {ip}, a private/internal "
+            f"address (SSRF guard). If this is a price page you really host there, "
+            f"add the host to RAVENS_NEST_FETCH_ALLOW_HOSTS."
+        )
+
+
+def validate_link_url(url: str, resolve: bool = True) -> None:
+    """Audit C3(b): supplier links may only be public http(s) URLs.
+
+    resolve=True (the fetch path) resolves the hostname and checks every
+    resolved address — the literal string is not enough, a public name
+    can point at 127.0.0.1. resolve=False (save-time validation) checks
+    scheme and literal-IP hosts only, so saving a link works offline.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"only http/https product URLs are supported (got {parsed.scheme or 'no'}"
+            f" scheme) — e.g. https://example.com/product/123"
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValueError("that URL has no hostname — e.g. https://example.com/product/123")
+    if host.lower() in _allow_hosts():
+        return
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        _check_ip(literal, host)
+        return
+    if not resolve:
+        return
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"could not resolve {host!r}: {exc}") from exc
+    for *_rest, sockaddr in infos:
+        address = str(sockaddr[0]).split("%", 1)[0]  # strip IPv6 zone id
+        _check_ip(ipaddress.ip_address(address), host)
+
+
 def fetch_url(url: str) -> str:
-    """Fetch one product page. Patched in tests."""
+    """Fetch one product page (SSRF-guarded). Patched in tests."""
+    validate_link_url(url, resolve=True)
     response = httpx.get(
         url,
         timeout=FETCH_TIMEOUT,

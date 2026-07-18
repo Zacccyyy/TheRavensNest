@@ -7,15 +7,20 @@ commit+push.
 
 from __future__ import annotations
 
+import hmac
+import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from decimal import InvalidOperation
 from pathlib import Path
 
 import anyio
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+log = logging.getLogger(__name__)
 
 from . import db, ingest, setup_wizard, store, ui, ui_command
 from .commands import router as commands_router
@@ -39,6 +44,13 @@ def _get_manager() -> SyncManager:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if not os.environ.get("RAVENS_NEST_TOKEN"):
+        log.warning(
+            "RAVENS_NEST_TOKEN is not set — anyone who can reach this server "
+            "can read and write the whole inventory (and download it via "
+            "/export/full.zip). Fine on a trusted single-user machine; set the "
+            "variable to require a passphrase before serving on a network."
+        )
     manager = _get_manager()
     await anyio.to_thread.run_sync(manager.startup)
     await anyio.to_thread.run_sync(ingest.scan_inbox)
@@ -58,6 +70,93 @@ app.include_router(projects_router)
 app.include_router(sourcing_router)
 app.include_router(importexport_router)
 app.include_router(setup_wizard.router)
+
+
+# ------------------------------------------------------------------- auth
+# Audit C3: single shared token. Unset = open (single-user default, warned
+# about at startup); set = every route except the health ping, the login
+# page, and static files requires it — via HttpOnly cookie (entered once
+# per browser) or an X-RN-Token header (for curl/scripts).
+
+_AUTH_EXEMPT = ("/health", "/login")
+
+_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Raven's Nest — unlock</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:24rem;margin:15vh auto;padding:1rem}}
+input{{width:100%;font-size:1.1rem;padding:.6rem;box-sizing:border-box;margin:.5rem 0}}
+button{{padding:.6rem 1.2rem;font-size:1rem;background:#1d4ed8;color:#fff;border:none;border-radius:6px}}
+.err{{color:#991b1b}}</style></head>
+<body>
+<h1>🐦‍⬛ The Raven's Nest</h1>
+<p>This inventory is protected. Enter the access token
+(the <code>RAVENS_NEST_TOKEN</code> value set on the server) — once per browser.</p>
+{error}
+<form method="post" action="/login">
+  <input type="password" name="token" autofocus autocomplete="current-password"
+         placeholder="access token">
+  <button type="submit">Unlock</button>
+</form>
+</body></html>"""
+
+
+def _required_token() -> str | None:
+    return os.environ.get("RAVENS_NEST_TOKEN") or None
+
+
+def _token_ok(request: Request, token: str) -> bool:
+    supplied = request.cookies.get("rn_token") or request.headers.get("x-rn-token") or ""
+    return hmac.compare_digest(supplied, token)
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    token = _required_token()
+    if token is None:
+        return await call_next(request)
+    path = request.url.path
+    if path in _AUTH_EXEMPT or path.startswith("/static/"):
+        return await call_next(request)
+    if _token_ok(request, token):
+        return await call_next(request)
+    if request.method == "GET":
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": "authentication required — open /login in a browser, or "
+            "send the token in an X-RN-Token header"
+        },
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form() -> str:
+    if _required_token() is None:
+        return _LOGIN_HTML.format(error="<p class='err'>No token is configured — the app is open. Just go to <a href='/'>the command bar</a>.</p>")
+    return _LOGIN_HTML.format(error="")
+
+
+@app.post("/login")
+def login_submit(request: Request, token: str = Form("")):
+    required = _required_token()
+    if required is None:
+        return RedirectResponse(url="/", status_code=303)
+    if not hmac.compare_digest(token, required):
+        return HTMLResponse(
+            _LOGIN_HTML.format(error="<p class='err'>Wrong token — check the RAVENS_NEST_TOKEN value on the server.</p>"),
+            status_code=200,
+        )
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        "rn_token",
+        token,
+        httponly=True,
+        samesite="lax",
+        max_age=180 * 24 * 3600,  # once per browser, effectively
+    )
+    return response
 
 
 @app.get("/health")

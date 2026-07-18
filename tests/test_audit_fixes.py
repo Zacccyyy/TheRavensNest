@@ -208,3 +208,120 @@ def test_c4_health_flags_legacy_assets_with_gps(data_dir):
     (config.assets_dir() / ("ab" * 32 + ".jpg")).write_bytes(_jpeg_with_exif())
     flagged = health.assets_with_gps()
     assert flagged == ["ab" * 32 + ".jpg"]
+
+
+# ------------------------------------------------------------------ C3
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from ravens_nest.app import app
+
+    return TestClient(app)
+
+
+def test_c3_no_token_env_means_open_access(data_dir):
+    assert _client().get("/").status_code == 200
+
+
+def test_c3_token_required_when_set(data_dir, monkeypatch):
+    monkeypatch.setenv("RAVENS_NEST_TOKEN", "shed-passphrase")
+    client = _client()
+    # Unauthenticated browser GET → login redirect; API POST → 401.
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+    assert client.post("/command", data={"q": "low"}).status_code == 401
+    # Health ping, login page, and static stay reachable.
+    assert client.get("/health").status_code == 200
+    assert client.get("/login").status_code == 200
+    assert client.get("/static/htmx.min.js").status_code == 200
+
+    # Wrong token → stays on login with an error, no cookie.
+    response = client.post("/login", data={"token": "nope"})
+    assert "Wrong token" in response.text
+    # Right token → cookie set once, everything works after.
+    response = client.post(
+        "/login", data={"token": "shed-passphrase"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert "rn_token" in response.cookies
+    assert "HttpOnly" in response.headers["set-cookie"]
+    assert client.get("/").status_code == 200  # TestClient kept the cookie
+    assert client.post("/command", data={"q": "low"}).status_code == 200
+
+    # Header auth for scripts/curl.
+    bare = _client()
+    assert bare.get("/export/items.csv", follow_redirects=False).status_code == 302
+    assert bare.get(
+        "/export/items.csv", headers={"X-RN-Token": "shed-passphrase"}
+    ).status_code == 200
+
+
+def test_c3_ssrf_guard_refuses_private_addresses(data_dir):
+    import pytest
+
+    from ravens_nest import pricing
+
+    for url in (
+        "http://192.168.1.1/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:8000/export/full.zip",
+        "http://[::1]/",
+        "http://10.0.0.5/x",
+        "ftp://example.com/x",
+        "file:///etc/passwd",
+    ):
+        with pytest.raises(ValueError):
+            pricing.validate_link_url(url)
+
+
+def test_c3_ssrf_guard_allows_public_and_allowlist(data_dir, monkeypatch):
+    import socket as socket_module
+
+    from ravens_nest import pricing
+
+    # Public resolution → allowed (DNS mocked so the test runs offline).
+    monkeypatch.setattr(
+        socket_module,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    pricing.validate_link_url("https://example.com/product/123")  # no raise
+
+    # A name resolving to a private address is refused even though the
+    # literal looks public…
+    import pytest
+
+    monkeypatch.setattr(
+        socket_module,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("192.168.1.50", 0))],
+    )
+    with pytest.raises(ValueError):
+        pricing.validate_link_url("https://innocent-looking.example/")
+    # …unless explicitly allowlisted.
+    monkeypatch.setenv("RAVENS_NEST_FETCH_ALLOW_HOSTS", "innocent-looking.example")
+    pricing.validate_link_url("https://innocent-looking.example/")  # no raise
+
+
+def test_c3_add_link_route_rejects_bad_scheme(data_dir):
+    from ravens_nest import store
+
+    item = store.create_item("Servo", "each")["payload"]["id"]
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    import sqlite3
+
+    from ravens_nest import db
+
+    conn = db.connect()
+    supplier = conn.execute("SELECT id FROM suppliers LIMIT 1").fetchone()[0]
+    conn.close()
+    response = client.post(
+        f"/items/{item}/links",
+        data={"supplier_id": supplier, "url": "file:///etc/passwd"},
+    )
+    assert response.status_code == 400
+    assert "http" in response.json()["detail"]  # states what's expected

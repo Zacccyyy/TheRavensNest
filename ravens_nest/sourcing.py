@@ -347,6 +347,10 @@ def add_link(
     pack_qty: str = Form("1"),
     last_price_aud: str = Form(""),
 ) -> RedirectResponse:
+    try:
+        pricing.validate_link_url(url.strip(), resolve=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     store.add_item_link(
         item_id,
         supplier_id,
