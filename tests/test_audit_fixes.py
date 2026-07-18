@@ -445,6 +445,129 @@ def test_h2_command_need_garbage_qty_is_friendly(data_dir):
     assert QTY_MSG in response.text
 
 
+# -------------------------------------------- atomic multi-line writes
+
+
+def test_atomic_receive_order_bad_line_writes_nothing(data_dir):
+    """A 3-line order with garbage in line 3 must write ZERO events and
+    name the bad line — never leave lines 1-2 half-applied."""
+    from ravens_nest import db, store
+
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    conn = db.connect()
+    supplier = conn.execute("SELECT id FROM suppliers LIMIT 1").fetchone()[0]
+    conn.close()
+    a = store.create_item("Part A", "each", qty_on_hand=1)["payload"]["id"]
+    b = store.create_item("Part B", "each", qty_on_hand=2)["payload"]["id"]
+    c = store.create_item("Part C", "each", qty_on_hand=3)["payload"]["id"]
+    baseline = len(events.read_all_events())
+
+    response = client.post(
+        "/orders/receive",
+        data={
+            "supplier_id": supplier,
+            "reliability": "4",
+            "item_id": [a, b, c],
+            "qty": ["5", "10", "banana"],
+            "unit_price": ["1.00", "", ""],
+        },
+    )
+    assert response.status_code == 200
+    assert "line 3" in response.text and "banana" in response.text
+    assert "Nothing was recorded" in response.text
+    assert len(events.read_all_events()) == baseline  # ZERO events written
+    conn = db.connect()
+    quantities = [
+        conn.execute("SELECT qty_on_hand FROM items WHERE id = ?", (x,)).fetchone()[0]
+        for x in (a, b, c)
+    ]
+    rating = conn.execute(
+        "SELECT reliability FROM suppliers WHERE id = ?", (supplier,)
+    ).fetchone()[0]
+    conn.close()
+    assert quantities == ["1", "2", "3"]  # untouched
+    assert rating is None  # the rating didn't apply either
+
+
+def test_atomic_receive_order_all_valid_applies_every_line(data_dir):
+    from ravens_nest import db, store
+
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    conn = db.connect()
+    supplier = conn.execute("SELECT id FROM suppliers LIMIT 1").fetchone()[0]
+    conn.close()
+    a = store.create_item("Part A", "each", qty_on_hand=1)["payload"]["id"]
+    b = store.create_item("Part B", "each", qty_on_hand=2)["payload"]["id"]
+    c = store.create_item("Part C", "each", qty_on_hand=3)["payload"]["id"]
+
+    response = client.post(
+        "/orders/receive",
+        data={
+            "supplier_id": supplier,
+            "reliability": "5",
+            "item_id": [a, b, c],
+            "qty": ["5", "10", "0.5"],
+            "unit_price": ["1.00", "", "2.50"],
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    conn = db.connect()
+    rows = {
+        x: conn.execute(
+            "SELECT qty_on_hand, last_paid_aud FROM items WHERE id = ?", (x,)
+        ).fetchone()
+        for x in (a, b, c)
+    }
+    rating = conn.execute(
+        "SELECT reliability FROM suppliers WHERE id = ?", (supplier,)
+    ).fetchone()[0]
+    conn.close()
+    assert (rows[a]["qty_on_hand"], rows[a]["last_paid_aud"]) == ("6", "1")
+    assert (rows[b]["qty_on_hand"], rows[b]["last_paid_aud"]) == ("12", None)
+    assert (rows[c]["qty_on_hand"], rows[c]["last_paid_aud"]) == ("3.5", "2.5")
+    assert rating == 5
+
+
+def test_atomic_recount_bad_count_writes_nothing(data_dir):
+    from ravens_nest import db, store
+
+    a = store.create_item("Part A", "each", qty_on_hand=10, location_id="A-1-1")["payload"]["id"]
+    b = store.create_item("Part B", "each", qty_on_hand=5, location_id="A-1-1")["payload"]["id"]
+    baseline = len(events.read_all_events())
+
+    response = _client().post(
+        "/command/recount",
+        data={"location_id": "A-1-1", "item_id": [a, b], "counted": ["7", "some"]},
+    )
+    assert "Nothing recounted" in response.text and "line 2" in response.text
+    assert len(events.read_all_events()) == baseline  # A's change did NOT apply
+    conn = db.connect()
+    qty = conn.execute("SELECT qty_on_hand FROM items WHERE id = ?", (a,)).fetchone()[0]
+    conn.close()
+    assert qty == "10"
+
+    # And a fully valid recount still applies both.
+    response = _client().post(
+        "/command/recount",
+        data={"location_id": "A-1-1", "item_id": [a, b], "counted": ["7", "5"]},
+    )
+    assert "1 corrected, 1 already right" in response.text
+
+
+def test_atomic_import_apply_row_no_orphan_event_for_vanished_target(data_dir):
+    from ravens_nest import importexport
+
+    rows, errors = importexport.parse_items_csv("name,qty\nGhost part,5\n")
+    assert errors == []
+    baseline = len(events.read_all_events())
+    outcome = importexport.apply_row(rows[0], "no-such-item-id")
+    assert "skipped" in outcome
+    assert len(events.read_all_events()) == baseline  # no orphan item.updated
+
+
 # ------------------------------------------------ enforcement (item 10)
 
 

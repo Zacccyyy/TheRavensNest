@@ -187,6 +187,18 @@ def apply_row(row: dict[str, Any], decision: str) -> str:
         outcome = "created"
     else:
         item_id = decision
+        # Existence check BEFORE any write — a tampered/vanished target
+        # must not receive an orphan item.updated event (atomic
+        # remediation item 2 sweep).
+        conn = db.connect()
+        try:
+            current = conn.execute(
+                "SELECT qty_on_hand, location_id FROM items WHERE id = ?", (item_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if current is None:
+            return "target item vanished — skipped"
         updates: dict[str, Any] = {}
         if row["description"]:
             updates["description"] = _description(row)
@@ -198,15 +210,6 @@ def apply_row(row: dict[str, Any], decision: str) -> str:
             updates["part_number"] = row["part_number"]
         if updates:
             store.update_item(item_id, **updates)
-        conn = db.connect()
-        try:
-            current = conn.execute(
-                "SELECT qty_on_hand, location_id FROM items WHERE id = ?", (item_id,)
-            ).fetchone()
-        finally:
-            conn.close()
-        if current is None:
-            return "target item vanished — skipped"
         if row["qty"] is not None and db.parse_qty(row["qty"]) != db.parse_qty(current["qty_on_hand"]):
             delta = db.qty_str(db.parse_qty(row["qty"]) - db.parse_qty(current["qty_on_hand"]))
             store.record_event(

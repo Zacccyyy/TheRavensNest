@@ -648,34 +648,45 @@ def command_recount(
     item_id: list[str] = Form([]),
     counted: list[str] = Form([]),
 ) -> str:
-    changed = 0
-    unchanged = 0
-    for line_item, line_count in zip(item_id, counted):
-        if not line_item.strip() or not line_count.strip():
-            continue
-        conn = db.connect()
-        try:
-            row = conn.execute(
+    """Validate every count first, apply only if ALL parse — one bad line
+    must not leave a bin half-recounted (atomic remediation item 2)."""
+    conn = db.connect()
+    try:
+        current = {
+            line_item: conn.execute(
                 "SELECT qty_on_hand FROM items WHERE id = ?", (line_item,)
             ).fetchone()
-        finally:
-            conn.close()
+            for line_item in item_id
+            if line_item.strip()
+        }
+    finally:
+        conn.close()
+
+    plan: list[tuple[str, Any]] = []
+    unchanged = 0
+    for row_no, (line_item, line_count) in enumerate(zip(item_id, counted), start=1):
+        if not line_item.strip() or not line_count.strip():
+            continue
+        row = current.get(line_item)
         if row is None:
             continue
         try:
             counted_qty = db.parse_qty(line_count)
         except (InvalidOperation, TypeError):
             return ui_command.note(
-                f"{line_count!r} is not a number — counts are plain numbers like 8 or 12.5.",
+                f"Nothing recounted — line {row_no}: {line_count!r} is not a number; "
+                f"counts are plain numbers like 8 or 12.5.",
                 error=True,
             )
         if counted_qty == db.parse_qty(row["qty_on_hand"]):
             unchanged += 1
-            continue
+        else:
+            plan.append((line_item, counted_qty))
+
+    for line_item, counted_qty in plan:
         store.recount_item(line_item, counted_qty)
-        changed += 1
     return ui_command.note(
-        f"Recounted {location_id}: {changed} corrected, {unchanged} already right."
+        f"Recounted {location_id}: {len(plan)} corrected, {unchanged} already right."
     )
 
 

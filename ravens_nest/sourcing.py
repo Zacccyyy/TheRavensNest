@@ -549,38 +549,72 @@ def receive_order(
             conn.close()
         return HTMLResponse(ui_sourcing.receive_order_page(suppliers, items, error=message))
 
-    received = 0
-    for line_item, line_qty, line_price in zip(item_id, qty, unit_price):
+    # ---- Phase 1: validate EVERY line and the rating. Nothing is written
+    # until the whole order checks out — a garbage line 3 must not leave
+    # line 1's events half-applied (atomic remediation item 2).
+    rating: int | None = None
+    if reliability.strip():
+        try:
+            rating = int(reliability)
+        except ValueError:
+            return _receive_error(
+                f"{reliability!r} isn't a rating — reliability is a whole number 1-5."
+            )
+        if not 1 <= rating <= 5:
+            return _receive_error("Reliability must be between 1 and 5.")
+
+    conn = db.connect()
+    try:
+        known_items = {r["id"] for r in conn.execute("SELECT id FROM items")}
+    finally:
+        conn.close()
+
+    lines: list[tuple[str, object, str | None]] = []
+    errors: list[str] = []
+    for row_no, (line_item, line_qty, line_price) in enumerate(
+        zip(item_id, qty, unit_price), start=1
+    ):
         if not line_item.strip() or not line_qty.strip():
+            continue  # blank form rows are fine
+        if line_item not in known_items:
+            errors.append(f"line {row_no}: that item no longer exists")
             continue
         try:
             quantity = db.parse_qty(line_qty)
         except (InvalidOperation, TypeError):
-            return _receive_error(
-                f"{line_qty!r} isn't a quantity — quantities are plain numbers like 8 or 12.5."
+            errors.append(
+                f"line {row_no}: {line_qty!r} isn't a quantity — quantities are "
+                f"plain numbers like 8 or 12.5"
             )
+            continue
         if quantity <= 0:
             continue
+        paid: str | None = None
         if line_price.strip():
             try:
                 paid = db.qty_str(db.parse_qty(line_price))
             except (InvalidOperation, TypeError):
-                return _receive_error(
-                    f"{line_price!r} isn't a price — quantities are plain numbers like 8 or 12.5."
+                errors.append(
+                    f"line {row_no}: {line_price!r} isn't a price — quantities are "
+                    f"plain numbers like 8 or 12.5"
                 )
-            store.update_item(line_item, last_paid_aud=paid)
-        store.adjust_qty(
-            line_item, quantity, f"order received: {supplier['name']}"
+                continue
+        lines.append((line_item, quantity, paid))
+
+    if errors:
+        return _receive_error(
+            "Nothing was recorded — fix these first: " + "; ".join(errors) + "."
         )
-        if line_item in manual_basket:
-            store.remove_basket_item(line_item)
-        received += 1
-    if received == 0:
+    if not lines:
         raise HTTPException(status_code=400, detail="no order lines filled in")
 
-    if reliability.strip():
-        rating = int(reliability)
-        if not 1 <= rating <= 5:
-            raise HTTPException(status_code=400, detail="reliability must be 1-5")
+    # ---- Phase 2: every line validated — now write the events.
+    for line_item, quantity, paid in lines:
+        if paid is not None:
+            store.update_item(line_item, last_paid_aud=paid)
+        store.adjust_qty(line_item, quantity, f"order received: {supplier['name']}")
+        if line_item in manual_basket:
+            store.remove_basket_item(line_item)
+    if rating is not None:
         store.update_supplier(supplier_id, reliability=rating)
     return RedirectResponse(url="/reorder", status_code=303)
