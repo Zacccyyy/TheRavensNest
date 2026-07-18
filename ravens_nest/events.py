@@ -36,6 +36,11 @@ EVENT_TYPES = frozenset(
         "item.link_price_checked",
         "basket.item_added",
         "basket.item_removed",
+        "item.archived",
+        "item.unarchived",
+        "item.merged",
+        "item.unmerged",
+        "item.alias_added",
     }
 )
 

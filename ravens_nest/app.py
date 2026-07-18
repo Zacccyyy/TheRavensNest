@@ -17,8 +17,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, ingest, store, ui, ui_command
+from . import db, ingest, setup_wizard, store, ui, ui_command
 from .commands import router as commands_router
+from .importexport import router as importexport_router
 from .locations import InvalidLocationId
 from .movement import router as movement_router
 from .projects import router as projects_router
@@ -55,6 +56,8 @@ app.include_router(commands_router)
 app.include_router(movement_router)
 app.include_router(projects_router)
 app.include_router(sourcing_router)
+app.include_router(importexport_router)
+app.include_router(setup_wizard.router)
 
 
 @app.get("/health")
@@ -64,8 +67,11 @@ def health() -> dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    """The primary interface: one command bar plus results. No nav tree."""
-    return ui_command.command_page(len(ingest.list_cards()))
+    """The primary interface: one command bar plus results. No nav tree.
+    A fresh install gets pointed at the guided setup."""
+    return ui_command.command_page(
+        len(ingest.list_cards()), show_setup=setup_wizard.is_fresh_install()
+    )
 
 
 # ------------------------------------------------------------------- sync
@@ -118,9 +124,26 @@ def _merge_targets() -> list[dict]:
     conn = db.connect()
     try:
         rows = conn.execute(
-            "SELECT id, name, qty_on_hand, unit_type FROM items ORDER BY name"
+            "SELECT id, name, qty_on_hand, unit_type FROM items WHERE archived = 0 ORDER BY name"
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _near_matches_for(card: dict) -> list[dict]:
+    """Proactive duplicate check at confirm time — surfaced ABOVE the
+    confirm button so a duplicate is impossible to miss."""
+    from . import merge
+
+    fields = card.get("fields", {})
+    name = (fields.get("name") or {}).get("value")
+    part = (fields.get("part_number") or {}).get("value")
+    if not name and not part:
+        return []
+    conn = db.connect()
+    try:
+        return merge.near_matches(conn, name or "", part)
     finally:
         conn.close()
 
@@ -129,12 +152,16 @@ def _next_card() -> str:
     cards = ingest.list_cards()
     if not cards:
         return ui.empty_partial()
-    return ui.card_partial(cards[0], len(cards), _merge_targets())
+    return ui.card_partial(
+        cards[0], len(cards), _merge_targets(), near=_near_matches_for(cards[0])
+    )
 
 
 @app.get("/queue", response_class=HTMLResponse)
 def queue() -> str:
-    return ui.queue_page(ingest.list_cards(), _merge_targets())
+    cards = ingest.list_cards()
+    near = _near_matches_for(cards[0]) if cards else []
+    return ui.queue_page(cards, _merge_targets(), near)
 
 
 @app.post("/queue/{photo_hash}/confirm", response_class=HTMLResponse)
@@ -174,13 +201,13 @@ def confirm_card(
             description="; ".join(p for p in parts if p),
             part_number=part_number.strip() or None,
             location_id=location_id.strip() or None,
-            photo_hash=photo_hash,
+            photo_hash=card["photo_hash"],
         )
     except InvalidLocationId as exc:
         return rerender(str(exc))
     except (InvalidOperation, TypeError, ValueError) as exc:
         return rerender(f"Invalid quantity: {exc}")
-    ingest.delete_card(photo_hash)
+    ingest.delete_card(card["id"])
     return _next_card()
 
 
@@ -205,16 +232,19 @@ def merge_card(
     if row is None:
         return rerender("That item no longer exists.")
     try:
-        store.adjust_qty(item_id, qty.strip() or "0", f"merged photo capture {photo_hash[:12]}")
+        store.adjust_qty(
+            item_id, qty.strip() or "0", f"merged photo capture {card['photo_hash'][:12]}"
+        )
     except (InvalidOperation, TypeError, ValueError) as exc:
         return rerender(f"Invalid quantity: {exc}")
     if row["photo_hash"] is None:
-        store.update_item(item_id, photo_hash=photo_hash)
-    ingest.delete_card(photo_hash)
+        store.update_item(item_id, photo_hash=card["photo_hash"])
+    ingest.delete_card(card["id"])
     return _next_card()
 
 
 @app.post("/queue/{photo_hash}/skip", response_class=HTMLResponse)
 def skip_card(photo_hash: str) -> str:
+    """Dismiss one card — sibling detections from the same photo stay."""
     ingest.delete_card(photo_hash)
     return _next_card()

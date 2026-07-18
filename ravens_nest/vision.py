@@ -36,31 +36,48 @@ FIELDS = (
 CONFIDENCES = frozenset({"high", "medium", "low"})
 UNIT_TYPES = frozenset({"each", "g", "mm", "mL"})
 
-_SCHEMA = """\
-{
-  "name": {"value": <string or null>, "confidence": "high"|"medium"|"low"},
-  "description": {"value": <string or null>, "confidence": ...},
-  "part_number": {"value": <string or null>, "confidence": ...},
-  "unit_type": {"value": "each"|"g"|"mm"|"mL" or null, "confidence": ...},
-  "qty_visible": {"value": <number or null>, "confidence": ...},
-  "manufacturer": {"value": <string or null>, "confidence": ...},
-  "package_type": {"value": <string or null>, "confidence": ...},
-  "questions": [{"field": <field name>, "question": <string>}]
-}"""
+_ITEM_SCHEMA = """\
+    {
+      "name": {"value": <string or null>, "confidence": "high"|"medium"|"low"},
+      "description": {"value": <string or null>, "confidence": ...},
+      "part_number": {"value": <string or null>, "confidence": ...},
+      "unit_type": {"value": "each"|"g"|"mm"|"mL" or null, "confidence": ...},
+      "qty_visible": {"value": <number or null>, "confidence": ...},
+      "manufacturer": {"value": <string or null>, "confidence": ...},
+      "package_type": {"value": <string or null>, "confidence": ...},
+      "photo_region": <string or null>,
+      "questions": [{"field": <field name>, "question": <string>}]
+    }"""
+
+_SCHEMA = f"""\
+{{
+  "items": [
+{_ITEM_SCHEMA}
+  ]
+}}"""
 
 SYSTEM_PROMPT = f"""\
-You catalog workshop inventory from a photo of one item (or a batch of identical items).
+You catalog workshop inventory from a photo. The photo may show ONE item (or a batch of \
+identical items), or SEVERAL distinct items (e.g. a drawer with different parts).
 
 Return ONLY a JSON object — no markdown fences, no commentary before or after — with exactly this shape:
 
 {_SCHEMA}
 
 Rules:
-- NEVER guess. If a field cannot be determined from the image, set its value to null and add \
-ONE targeted question for that field to "questions". An educated guess is still a guess — use null.
+- One entry in "items" per DISTINCT item you can confidently separate. A batch of identical \
+parts is ONE entry (count them in qty_visible).
+- NEVER split speculatively. If you cannot confidently tell whether things are distinct items, \
+return ONE entry covering the photo and add a question saying the photo may contain multiple \
+items and asking the user to confirm.
+- NEVER guess field values. If a field cannot be determined from the image, set its value to \
+null and add ONE targeted question for that field to that item's "questions". An educated \
+guess is still a guess — use null.
 - Questions must be specific and answerable in a few words, e.g. \
 "Hex socket cap screw, M3, length unknown — what length?" One question per unknown field; \
 no questions for fields you filled in.
+- photo_region: a few words locating this item in the photo ("top-left", "the blue tray, \
+centre"), so the user can tell which detection is which. null for a single-item photo.
 - confidence: "high" = clearly visible or legible, "medium" = probable from strong visual \
 evidence, "low" = weak evidence.
 - unit_type is how the item is counted or measured: "each" for discrete items, "g" for weight, \
@@ -80,6 +97,7 @@ def blank_extraction(error: str | None = None) -> dict[str, Any]:
     return {
         "fields": {f: {"value": None, "confidence": "low"} for f in FIELDS},
         "questions": [],
+        "photo_region": None,
         "error": error,
     }
 
@@ -100,8 +118,10 @@ def _call_model(messages: list[dict[str, Any]]) -> str:
     return next((b.text for b in response.content if b.type == "text"), "")
 
 
-def extract_fields(image_bytes: bytes) -> dict[str, Any]:
-    """Identify an item from a JPEG. Never raises."""
+def extract_items(image_bytes: bytes) -> list[dict[str, Any]]:
+    """Identify the item(s) in a JPEG — one extraction per distinct item
+    the model can confidently separate. A single-item photo yields an
+    array of one. Never raises; failures yield one blank extraction."""
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
@@ -114,7 +134,7 @@ def extract_fields(image_bytes: bytes) -> dict[str, Any]:
                         "data": base64.standard_b64encode(image_bytes).decode("ascii"),
                     },
                 },
-                {"type": "text", "text": "Identify this inventory item."},
+                {"type": "text", "text": "Identify the inventory item(s) in this photo."},
             ],
         }
     ]
@@ -122,7 +142,7 @@ def extract_fields(image_bytes: bytes) -> dict[str, Any]:
         text = _call_model(messages)
     except Exception as exc:
         log.warning("vision call failed: %s", exc)
-        return blank_extraction(f"vision call failed: {type(exc).__name__}: {exc}")
+        return [blank_extraction(f"vision call failed: {type(exc).__name__}: {exc}")]
 
     parsed = _parse_json(text)
     if parsed is None:
@@ -134,12 +154,21 @@ def extract_fields(image_bytes: bytes) -> dict[str, Any]:
             text = _call_model(retry_messages)
         except Exception as exc:
             log.warning("vision retry failed: %s", exc)
-            return blank_extraction(f"vision retry failed: {type(exc).__name__}: {exc}")
+            return [blank_extraction(f"vision retry failed: {type(exc).__name__}: {exc}")]
         parsed = _parse_json(text)
         if parsed is None:
-            return blank_extraction("model returned malformed JSON twice")
+            return [blank_extraction("model returned malformed JSON twice")]
 
-    return _normalize(parsed)
+    raw_items = parsed.get("items") if isinstance(parsed.get("items"), list) else None
+    if raw_items is None:
+        raw_items = [parsed]  # tolerate the legacy single-object shape
+    extractions = [_normalize(raw) for raw in raw_items if isinstance(raw, dict)]
+    return extractions or [blank_extraction("model returned an empty item list")]
+
+
+def extract_fields(image_bytes: bytes) -> dict[str, Any]:
+    """Single-item convenience wrapper (first detection)."""
+    return extract_items(image_bytes)[0]
 
 
 def _parse_json(text: str) -> dict[str, Any] | None:
@@ -203,4 +232,12 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    return {"fields": fields, "questions": questions, "error": None}
+    region = raw.get("photo_region")
+    if not isinstance(region, str) or not region.strip():
+        region = None
+    return {
+        "fields": fields,
+        "questions": questions,
+        "photo_region": region.strip() if region else None,
+        "error": None,
+    }

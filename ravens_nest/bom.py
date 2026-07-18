@@ -87,9 +87,13 @@ def parse_bom_csv(text: str) -> tuple[list[dict[str, Any]], list[str]]:
 
 
 def load_match_context(conn: sqlite3.Connection) -> dict[str, Any]:
+    # Archived items are excluded from BOM matching entirely — you said
+    # you'll never buy them again.
     items = [
         dict(row)
-        for row in conn.execute("SELECT id, name, part_number, unit_type FROM items")
+        for row in conn.execute(
+            "SELECT id, name, part_number, unit_type FROM items WHERE archived = 0"
+        )
     ]
     aliases = [dict(row) for row in conn.execute("SELECT alias_text, item_id FROM aliases")]
     return {"items": items, "aliases": aliases}
@@ -190,7 +194,7 @@ def reorder_basket(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     The needed amount restores free stock to at least max(0, min_qty)."""
     reserved = reserved_by_item(conn)
     basket = []
-    for item in conn.execute("SELECT * FROM items ORDER BY name"):
+    for item in conn.execute("SELECT * FROM items WHERE archived = 0 ORDER BY name"):
         on_hand = db.parse_qty(item["qty_on_hand"])
         item_reserved = reserved.get(item["id"], Decimal(0))
         free = on_hand - item_reserved
@@ -279,22 +283,22 @@ def build_shortages(
     return needs, shortages
 
 
-def attempt_build(project_id: str, count: int) -> tuple[bool, str]:
-    """Validate and execute a build. Returns (ok, message) — on failure the
-    message lists exactly what blocks it (unresolved lines or shortages)."""
+def attempt_build(project_id: str, count: int) -> tuple[bool, str, str | None]:
+    """Validate and execute a build. Returns (ok, message, event_id) — on
+    failure the message lists exactly what blocks it."""
     from . import store  # local import: store depends on replay, not on bom
 
     if count < 1:
-        return False, "Build count must be at least 1."
+        return False, "Build count must be at least 1.", None
     conn = db.connect()
     try:
         lines = matched_lines(conn, project_id)
         if not lines:
-            return False, "No BOM imported yet."
+            return False, "No BOM imported yet.", None
         unmatched = [l for l in lines if not l["item_id"]]
         if unmatched:
             nos = ", ".join(str(l["line_no"]) for l in unmatched)
-            return False, f"Cannot build: unresolved BOM line(s) {nos}."
+            return False, f"Cannot build: unresolved BOM line(s) {nos}.", None
         needs, shortages = build_shortages(conn, project_id, count)
     finally:
         conn.close()
@@ -303,12 +307,12 @@ def attempt_build(project_id: str, count: int) -> tuple[bool, str]:
             f"{s['name']}: need {s['needed']}, have {s['available']} free — short {s['short']} {s['unit_type']}"
             for s in shortages
         )
-        return False, f"Insufficient free stock: {detail}"
+        return False, f"Insufficient free stock: {detail}", None
     consumed = [
         {"item_id": item_id, "qty": db.qty_str(qty)} for item_id, qty in needs.items()
     ]
-    store.execute_build(project_id, count, consumed)
-    return True, f"Built ×{count}"
+    event = store.execute_build(project_id, count, consumed)
+    return True, f"Built ×{count}", event["id"]
 
 
 def net_builds(conn: sqlite3.Connection, project_id: str) -> int:

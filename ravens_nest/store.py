@@ -328,3 +328,33 @@ def remove_basket_item(
     item_id: str, conn: sqlite3.Connection | None = None
 ) -> dict[str, Any]:
     return record_event("basket.item_removed", {"item_id": item_id}, conn)
+
+
+def archive_item(
+    item_id: str, reason: str = "", conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    """Genuine retirement — the item, its photo, and its history all stay;
+    it just leaves search, reorder, and BOM matching."""
+    return record_event("item.archived", {"id": item_id, "reason": reason}, conn)
+
+
+def unarchive_item(item_id: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    return record_event("item.unarchived", {"id": item_id}, conn)
+
+
+def add_alias(
+    item_id: str, alias_text: str, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    return record_event(
+        "item.alias_added", {"item_id": item_id, "alias_text": alias_text}, conn
+    )
+
+
+def merge_items(payload: dict[str, Any], conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Payload is fully precomputed by merge.build_merge_payload so the
+    applier (and any replay) never has to guess."""
+    return record_event("item.merged", payload, conn)
+
+
+def unmerge_items(payload: dict[str, Any], conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    return record_event("item.unmerged", payload, conn)

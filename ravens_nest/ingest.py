@@ -38,25 +38,39 @@ def store_asset(data: bytes) -> tuple[str, bool]:
     return photo_hash, False
 
 
-def _card_path(photo_hash: str) -> Path:
-    return config.pending_dir() / f"{photo_hash}.json"
+def _card_path(card_id: str) -> Path:
+    return config.pending_dir() / f"{card_id}.json"
 
 
-def load_card(photo_hash: str) -> dict[str, Any] | None:
-    path = _card_path(photo_hash)
+def load_card(card_id: str) -> dict[str, Any] | None:
+    path = _card_path(card_id)
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def save_card(card: dict[str, Any]) -> None:
-    path = _card_path(card["photo_hash"])
+    path = _card_path(card["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def delete_card(photo_hash: str) -> None:
-    _card_path(photo_hash).unlink(missing_ok=True)
+def delete_card(card_id: str) -> None:
+    """Dismiss one card; sibling detections from the same photo stay."""
+    _card_path(card_id).unlink(missing_ok=True)
+
+
+def cards_for_photo(photo_hash: str) -> list[dict[str, Any]]:
+    directory = config.pending_dir()
+    if not directory.is_dir():
+        return []
+    cards = []
+    for path in sorted(directory.glob(f"{photo_hash}*.json")):
+        try:
+            cards.append(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return cards
 
 
 def list_cards() -> list[dict[str, Any]]:
@@ -66,10 +80,12 @@ def list_cards() -> list[dict[str, Any]]:
     if directory.is_dir():
         for path in directory.glob("*.json"):
             try:
-                cards.append(json.loads(path.read_text(encoding="utf-8")))
+                card = json.loads(path.read_text(encoding="utf-8"))
+                card.setdefault("id", card.get("photo_hash", path.stem))
+                cards.append(card)
             except (json.JSONDecodeError, OSError):
                 log.warning("skipping unreadable pending card %s", path.name)
-    cards.sort(key=lambda c: c.get("created_ts", ""))
+    cards.sort(key=lambda c: (c.get("created_ts", ""), c.get("index", 0)))
     return cards
 
 
@@ -85,16 +101,23 @@ def _item_with_photo(photo_hash: str) -> str | None:
 
 
 def ingest_photo(data: bytes) -> dict[str, Any]:
-    """Run one photo through the pipeline.
+    """Run one photo through the pipeline. A photo of several distinct
+    parts yields one review card per detection, all sharing the (single,
+    content-addressed) source photo.
 
-    Returns {"photo_hash", "status", "card"} where status is "new",
-    "duplicate_pending" (card already queued), or "already_cataloged"
+    Returns {"photo_hash", "status", "cards"} where status is "new",
+    "duplicate_pending" (cards already queued), or "already_cataloged"
     (an item already carries this photo)."""
     photo_hash, _ = store_asset(data)
 
-    existing = load_card(photo_hash)
-    if existing is not None:
-        return {"photo_hash": photo_hash, "status": "duplicate_pending", "card": existing}
+    existing = cards_for_photo(photo_hash)
+    if existing:
+        return {
+            "photo_hash": photo_hash,
+            "status": "duplicate_pending",
+            "cards": existing,
+            "card": existing[0],
+        }
 
     item_id = _item_with_photo(photo_hash)
     if item_id is not None:
@@ -102,19 +125,31 @@ def ingest_photo(data: bytes) -> dict[str, Any]:
             "photo_hash": photo_hash,
             "status": "already_cataloged",
             "item_id": item_id,
+            "cards": [],
             "card": None,
         }
 
-    extraction = vision.extract_fields(data)
-    card = {
-        "photo_hash": photo_hash,
-        "created_ts": datetime.now(timezone.utc).isoformat(),
-        "fields": extraction["fields"],
-        "questions": extraction["questions"],
-        "error": extraction.get("error"),
-    }
-    save_card(card)
-    return {"photo_hash": photo_hash, "status": "new", "card": card}
+    extractions = vision.extract_items(data)
+    now = datetime.now(timezone.utc).isoformat()
+    cards = []
+    for index, extraction in enumerate(extractions):
+        # First detection keeps the bare hash as its id (single-item photos
+        # behave exactly as before); siblings get ~2, ~3, …
+        card_id = photo_hash if index == 0 else f"{photo_hash}~{index + 1}"
+        card = {
+            "id": card_id,
+            "photo_hash": photo_hash,
+            "index": index,
+            "sibling_count": len(extractions),
+            "created_ts": now,
+            "fields": extraction["fields"],
+            "questions": extraction["questions"],
+            "photo_region": extraction.get("photo_region"),
+            "error": extraction.get("error"),
+        }
+        save_card(card)
+        cards.append(card)
+    return {"photo_hash": photo_hash, "status": "new", "cards": cards, "card": cards[0]}
 
 
 def scan_inbox() -> dict[str, Any]:

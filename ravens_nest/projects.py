@@ -258,7 +258,7 @@ def release_reservations(project_id: str) -> RedirectResponse:
 @router.post("/projects/{project_id}/build", response_class=HTMLResponse)
 def build(project_id: str, count: int = Form(...)):
     _project_or_404(project_id)
-    ok, message = bom.attempt_build(project_id, count)
+    ok, message, _event_id = bom.attempt_build(project_id, count)
     if not ok:
         return _project_view(project_id, error=message)
     return RedirectResponse(url=f"/projects/{project_id}", status_code=303)

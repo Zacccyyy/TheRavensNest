@@ -367,7 +367,7 @@ def reorder_page() -> str:
     try:
         entries = assemble_basket(conn)
         items = [
-            dict(r) for r in conn.execute("SELECT id, name FROM items ORDER BY name")
+            dict(r) for r in conn.execute("SELECT id, name FROM items WHERE archived = 0 ORDER BY name")
         ]
     finally:
         conn.close()
@@ -428,7 +428,7 @@ def price_basket() -> str:
     try:
         entries = assemble_basket(conn)
         items = [
-            dict(r) for r in conn.execute("SELECT id, name FROM items ORDER BY name")
+            dict(r) for r in conn.execute("SELECT id, name FROM items WHERE archived = 0 ORDER BY name")
         ]
     finally:
         conn.close()
@@ -448,7 +448,7 @@ def receive_order_form() -> str:
     conn = db.connect()
     try:
         suppliers = [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name")]
-        items = [dict(r) for r in conn.execute("SELECT id, name, unit_type FROM items ORDER BY name")]
+        items = [dict(r) for r in conn.execute("SELECT id, name, unit_type FROM items WHERE archived = 0 ORDER BY name")]
     finally:
         conn.close()
     return ui_sourcing.receive_order_page(suppliers, items)

@@ -49,6 +49,10 @@ details.tree-shelf { margin-left: 1rem; }
 .tree-bin.is-empty { color: #16a34a; }
 .tree-bin ul { margin: .2rem 0 .2rem 1.2rem; }
 .freespace { background: #f0fdf4; padding: .5rem .7rem; border-radius: 6px; }
+.dupwarn { border: 2px solid #dc2626; background: #fef2f2; border-radius: 8px;
+           padding: .7rem; margin: .6rem 0; font-size: 1rem; }
+.dupwarn form { display: inline; margin: 0 .3rem; }
+.zeroed { opacity: .55; }
 """
 
 _HOTKEYS = """
@@ -84,11 +88,11 @@ def page(title: str, body: str, scripts: tuple[str, ...] = ()) -> str:
 </html>"""
 
 
-def queue_page(cards: list[dict], items: list[dict]) -> str:
+def queue_page(cards: list[dict], items: list[dict], near: list[dict] | None = None) -> str:
     body = f"""<h1>Review queue</h1>
 <p class="count">Confirm creates the item; merge adds quantity to an existing item.
 <kbd>Tab</kbd> between fields, <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to confirm.</p>
-{card_partial(cards[0], len(cards), items) if cards else empty_partial()}"""
+{card_partial(cards[0], len(cards), items, near=near) if cards else empty_partial()}"""
     return page("The Raven's Nest — Review queue", body)
 
 
@@ -98,9 +102,14 @@ def empty_partial() -> str:
 
 
 def card_partial(
-    card: dict, total: int, items: list[dict], error: str | None = None
+    card: dict,
+    total: int,
+    items: list[dict],
+    error: str | None = None,
+    near: list[dict] | None = None,
 ) -> str:
     photo_hash = card["photo_hash"]
+    card_id = card.get("id", photo_hash)
     fields = card.get("fields", {})
     questions = {q["field"]: q["question"] for q in card.get("questions", []) if q.get("field")}
     general_questions = [q["question"] for q in card.get("questions", []) if not q.get("field")]
@@ -177,7 +186,7 @@ def card_partial(
     merge_html = ""
     if items:
         merge_html = f"""<div class="merge">
-  <form hx-post="/queue/{photo_hash}/merge" hx-target="#card" hx-swap="outerHTML">
+  <form hx-post="/queue/{card_id}/merge" hx-target="#card" hx-swap="outerHTML">
     <div class="row">
       <label for="item_id">Merge into</label>
       <select id="item_id" name="item_id">{item_options}</select>
@@ -190,11 +199,37 @@ def card_partial(
   </form>
 </div>"""
 
+    # Proactive duplicate warning — ABOVE the confirm button, unmissable.
+    near_html = ""
+    for match in near or []:
+        where = match.get("location_id") or "no location"
+        near_html += f"""<div class="dupwarn">
+⚠️ You have <strong>{_e(match["name"])}</strong> in {_e(where)}
+(qty {_e(match["qty_on_hand"])} {_e(match["unit_type"])}, match score {match["score"]})
+— same thing?
+<form class="inline" hx-post="/queue/{card_id}/merge" hx-target="#card" hx-swap="outerHTML">
+  <input type="hidden" name="item_id" value="{_e(match["id"])}">
+  <input type="hidden" name="qty" value="{_e(qty_value) or "1"}">
+  <button type="submit" class="primary">Merge — adds qty</button>
+</form>
+<button type="button" onclick="this.closest('.dupwarn').remove()">No, this is different</button>
+</div>"""
+
+    region_html = ""
+    if card.get("photo_region"):
+        region_html = (
+            f'<p class="count">📍 This card is for: <strong>{_e(card["photo_region"])}</strong>'
+            f' (detection {card.get("index", 0) + 1} of {card.get("sibling_count", 1)}'
+            f" from this photo)</p>"
+        )
+
     return f"""<div id="card">
 <p class="count">{total} card(s) in queue</p>
 <img class="photo" src="/assets/{photo_hash}.jpg" alt="captured item photo">
+{region_html}
 {error_html}{general_html}
-<form hx-post="/queue/{photo_hash}/confirm" hx-target="#card" hx-swap="outerHTML">
+{near_html}
+<form hx-post="/queue/{card_id}/confirm" hx-target="#card" hx-swap="outerHTML">
   {text_row("Name", "name", "name")}
   {text_row("Description", "description", "description")}
   {text_row("Part number", "part_number", "part_number")}
@@ -208,8 +243,8 @@ def card_partial(
   </div>
   <div class="actions">
     <button id="confirm-btn" type="submit" class="primary">Confirm — create item</button>
-    <button type="button" hx-post="/queue/{photo_hash}/skip" hx-target="#card"
-            hx-swap="outerHTML" hx-confirm="Discard this card? The photo stays in assets.">
+    <button type="button" hx-post="/queue/{card_id}/skip" hx-target="#card"
+            hx-swap="outerHTML" hx-confirm="Discard this card? The photo and any sibling cards stay.">
       Skip
     </button>
   </div>
@@ -428,7 +463,8 @@ def labels_page(
 <nav><a href="/">Home</a> <a href="/move">Move</a> <a href="/locations">Locations</a></nav>
 <div class="controls">
   <p>Print on 2&times;2in labels (Avery 22806 or similar), 3 per row.
-     Filter by unit: <a href="/labels">all</a> {unit_links}</p>
+     Filter by unit: <a href="/labels">all</a> {unit_links}
+     &middot; <a href="/labels/items">Item labels</a></p>
   <form method="post" action="/labels/generate">
     Generate: unit <input name="unit" placeholder="A" maxlength="1" required>
     shelves <input name="shelves" type="number" value="4" min="1" max="30">
@@ -439,6 +475,72 @@ def labels_page(
   <p><button onclick="window.print()">Print sheet</button></p>
 </div>
 {empty_note}
+<div class="sheet">{cells}</div>
+</body>
+</html>"""
+
+
+def item_labels_page(
+    labels: list[tuple[dict, str]],
+    all_items: list[dict],
+    bins: list[str],
+    location: str | None,
+) -> str:
+    """Item label sheet — smaller 4-column format, same print approach as
+    location labels. QR payloads carry the RN-ITEM: prefix."""
+    bin_options = "".join(f'<option value="{_e(b)}">{_e(b)}</option>' for b in bins)
+    item_options = "".join(
+        f'<option value="{_e(i["id"])}">{_e(i["name"])}'
+        f'{" — " + _e(i["location_id"]) if i.get("location_id") else ""}</option>'
+        for i in all_items
+    )
+    cells = "".join(
+        f'<div class="itemlabel">{svg}'
+        f'<div class="ilname">{_e(item["name"][:36])}</div>'
+        f'<div class="ilmeta">{_e(item["qty_on_hand"])} {_e(item["unit_type"])}'
+        f'{" · " + _e(item["location_id"]) if item.get("location_id") else ""}</div></div>'
+        for item, svg in labels
+    )
+    empty = "" if labels else "<p>Pick a bin or select items to print labels for.</p>"
+    heading = f"Item labels — {location}" if location else "Item labels"
+    style = """
+body { font-family: system-ui, sans-serif; margin: 1rem; }
+.controls { margin-bottom: 1rem; }
+/* 4 x 1.75in grid of small item labels */
+.sheet { display: grid; grid-template-columns: repeat(4, 1.75in); gap: 0.15in 0.35in; }
+.itemlabel { width: 1.75in; height: 1.75in; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; text-align: center;
+             break-inside: avoid; page-break-inside: avoid; border: 1px dashed #ddd; }
+.itemlabel svg { width: 1in; height: 1in; }
+.ilname { font-size: 8.5pt; font-weight: 600; }
+.ilmeta { font-family: ui-monospace, monospace; font-size: 8pt; }
+select[multiple] { min-width: 16rem; min-height: 8rem; }
+@media print { .controls, nav { display: none; } .itemlabel { border: none; }
+               @page { margin: 0.4in; } }
+"""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{_e(heading)}</title>
+  <style>{style}</style>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/labels">Location labels</a></nav>
+<div class="controls">
+  <form method="get" action="/labels/items">
+    Whole bin: <select name="location"><option value="">—</option>{bin_options}</select>
+    <button type="submit">Show labels</button>
+  </form>
+  <form method="get" action="/labels/items">
+    Selection (Ctrl/Cmd-click): <select name="item_id" multiple>{item_options}</select>
+    <button type="submit">Show labels</button>
+  </form>
+  <p><button onclick="window.print()">Print sheet</button>
+  Scanning an item label jumps straight to its item card.</p>
+</div>
+{empty}
 <div class="sheet">{cells}</div>
 </body>
 </html>"""

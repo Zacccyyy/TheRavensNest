@@ -58,8 +58,9 @@ def _apply_item_created(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) ->
         """
         INSERT OR REPLACE INTO items
             (id, name, description, part_number, unit_type, qty_on_hand,
-             min_qty, location_id, last_paid_aud, photo_hash, created_ts, updated_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             min_qty, location_id, last_paid_aud, photo_hash, archived,
+             created_ts, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         """,
         (
             p["id"],
@@ -321,6 +322,114 @@ def _apply_basket_item_removed(conn: sqlite3.Connection, ts: str, p: dict[str, A
     conn.execute("DELETE FROM basket_items WHERE item_id = ?", (p["item_id"],))
 
 
+def _set_archived(conn: sqlite3.Connection, ts: str, item_id: str, value: int) -> None:
+    cur = conn.execute(
+        "UPDATE items SET archived = ?, updated_ts = ? WHERE id = ?",
+        (value, ts, item_id),
+    )
+    if cur.rowcount == 0:
+        log.warning("archive toggle for unknown item %s", item_id)
+
+
+def _apply_item_archived(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> None:
+    _set_archived(conn, ts, p["id"], 1)
+
+
+def _apply_item_unarchived(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> None:
+    _set_archived(conn, ts, p["id"], 0)
+
+
+def _apply_item_alias_added(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO aliases (alias_text, item_id) VALUES (?, ?)",
+        (p["alias_text"], p["item_id"]),
+    )
+
+
+def _apply_item_merged(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> None:
+    """Merge is applied purely from its payload (computed at write time),
+    so replay stays deterministic. Target keeps identity; source archives
+    at qty 0 — never deleted, history intact."""
+    source, target = p["source_id"], p["target_id"]
+    _shift_item_qty(conn, ts, target, db.parse_qty(p["qty"]))
+    conn.execute(
+        "UPDATE items SET location_id = ?, updated_ts = ? WHERE id = ?",
+        (p["location_id"], ts, target),
+    )
+    if p.get("photo_transferred") and p.get("source_photo_hash"):
+        conn.execute(
+            "UPDATE items SET photo_hash = ?, updated_ts = ? WHERE id = ?",
+            (p["source_photo_hash"], ts, target),
+        )
+    for alias_text in p.get("aliases", []):
+        conn.execute(
+            "DELETE FROM aliases WHERE alias_text = ? AND item_id = ?",
+            (alias_text, source),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO aliases (alias_text, item_id) VALUES (?, ?)",
+            (alias_text, target),
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO aliases (alias_text, item_id) VALUES (?, ?)",
+        (p["source_name"], target),
+    )
+    for supplier_id in p.get("link_suppliers", []):
+        conn.execute(
+            "UPDATE item_links SET item_id = ? WHERE item_id = ? AND supplier_id = ?",
+            (target, source, supplier_id),
+        )
+    for reservation_id in p.get("reservation_ids", []):
+        conn.execute(
+            "UPDATE reservations SET item_id = ? WHERE id = ?", (target, reservation_id)
+        )
+    conn.execute(
+        "UPDATE items SET qty_on_hand = '0', archived = 1, updated_ts = ? WHERE id = ?",
+        (ts, source),
+    )
+
+
+def _apply_item_unmerged(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> None:
+    """Exact reversal of item.merged using the same recorded payload."""
+    source, target = p["source_id"], p["target_id"]
+    _shift_item_qty(conn, ts, target, -db.parse_qty(p["qty"]))
+    conn.execute(
+        "UPDATE items SET location_id = ?, updated_ts = ? WHERE id = ?",
+        (p.get("target_prev_location"), ts, target),
+    )
+    if p.get("photo_transferred"):
+        conn.execute(
+            "UPDATE items SET photo_hash = ?, updated_ts = ? WHERE id = ?",
+            (p.get("target_prev_photo"), ts, target),
+        )
+    for alias_text in p.get("aliases", []):
+        conn.execute(
+            "DELETE FROM aliases WHERE alias_text = ? AND item_id = ?",
+            (alias_text, target),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO aliases (alias_text, item_id) VALUES (?, ?)",
+            (alias_text, source),
+        )
+    conn.execute(
+        "DELETE FROM aliases WHERE alias_text = ? AND item_id = ?",
+        (p["source_name"], target),
+    )
+    for supplier_id in p.get("link_suppliers", []):
+        conn.execute(
+            "UPDATE item_links SET item_id = ? WHERE item_id = ? AND supplier_id = ?",
+            (source, target, supplier_id),
+        )
+    for reservation_id in p.get("reservation_ids", []):
+        conn.execute(
+            "UPDATE reservations SET item_id = ? WHERE id = ?", (source, reservation_id)
+        )
+    conn.execute(
+        "UPDATE items SET qty_on_hand = ?, archived = 0, location_id = ?, updated_ts = ? WHERE id = ?",
+        (db.qty_str(db.parse_qty(p["qty"])), p.get("source_prev_location"), ts, source),
+    )
+
+
 _HANDLERS = {
     "item.created": _apply_item_created,
     "item.updated": _apply_item_updated,
@@ -342,6 +451,11 @@ _HANDLERS = {
     "item.link_price_checked": _apply_item_link_price_checked,
     "basket.item_added": _apply_basket_item_added,
     "basket.item_removed": _apply_basket_item_removed,
+    "item.archived": _apply_item_archived,
+    "item.unarchived": _apply_item_unarchived,
+    "item.alias_added": _apply_item_alias_added,
+    "item.merged": _apply_item_merged,
+    "item.unmerged": _apply_item_unmerged,
 }
 
 

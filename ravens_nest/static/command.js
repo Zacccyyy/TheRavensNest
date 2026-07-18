@@ -57,4 +57,21 @@
   document.body.addEventListener("htmx:afterSwap", function (event) {
     if (event.target === result) input.focus();
   });
+
+  // Rotate example commands through the placeholder while the bar is empty,
+  // so features are discoverable without reading anything.
+  try {
+    var examples = JSON.parse(input.getAttribute("data-examples") || "[]");
+    if (examples.length > 1) {
+      var exampleIndex = 0;
+      setInterval(function () {
+        if (input.value === "") {
+          exampleIndex = (exampleIndex + 1) % examples.length;
+          input.placeholder = examples[exampleIndex];
+        }
+      }, 4000);
+    }
+  } catch (e) {
+    /* placeholder rotation is decoration — never break the bar over it */
+  }
 })();

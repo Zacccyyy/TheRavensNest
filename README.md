@@ -181,19 +181,104 @@ The primary interface is one input at `/` — no navigation tree:
 | You type | You get |
 |---|---|
 | `3mm heat shrink` | fuzzy search (name, part number, description, aliases) — "A-2-3b, 12 left, 4 free (8 reserved)" |
-| `A-2-3b` | what's in that bin |
+| `all: heat shrink` | search including zero-quantity items |
+| `archived: servo` | search retired items (they appear nowhere else) |
+| `A-2-3b` | what's in that bin (zero-qty greyed, still listed) |
 | `move to A-2-3b` | move mode: scan/type items, exact matches move immediately |
 | `build RPSRobot x2` | build confirmation with needs and shortages, then Confirm |
 | `need 20 more m3` | adds to the reorder basket (asks if ambiguous) |
 | `recount A-2-3b` | bin recount form — unchanged counts emit nothing |
 | `low` | everything with free stock under its min |
+| `history A-2-3b` | event history for a bin (or an item) — paginated, filterable |
+| `undo` | reverse your last action (`undo list` browses the last 20) |
+| `health` | data-quality score with itemised, fixable counts |
+| `merge` | scan for likely duplicate items |
 | `price basket` | on-demand basket pricing |
+| `help` | every command with examples; `help <verb>` for detail |
 
 Results appear as you type (read-only lookups render live; actions show a
 "press Enter" hint and only execute on Enter). Arrow keys move the
 selection, Enter acts, Esc clears. Ambiguous commands always ask instead
-of guessing. Item cards (`/items/<id>`) show the photo, every field,
-stock vs reservations by project, supplier links, and full event history.
+of guessing, and error messages say what was expected with a valid
+example ("Unknown location 'A-2-9' — Unit A shelf 2 has bins 1-6").
+
+**Zero vs archived**: an item at qty 0 is still an item you own — it
+keeps its bin, history, prices, links, and reorder logic, and is merely
+hidden from plain search (always with a "N zero-qty hidden" count).
+Archiving is genuine retirement: excluded from search, reorder, and BOM
+matching entirely, reachable only via `archived:`, reversible any time.
+
+**Undo**: every state-changing action gets a compensating event —
+nothing is ever deleted. The undo stack is per-machine (one computer
+never blind-undoes another's work), action toasts carry a one-click
+undo, undoing an undo redoes, and genuinely unsafe inverses (the item
+moved again since) are refused with an explanation and the manual path.
+
+Item cards (`/items/<id>`) show the photo, every field, stock vs
+reservations by project, supplier links, quick-edit fields, archive
+controls, and the item's narrated event history ("Moved A-1-2 → A-2-3b",
+"Consumed 2 by build RPSRobot ×1") with actor and timestamp — including
+the history of anything merged into it.
+
+## First-run setup, help, and health
+
+A fresh install offers a **guided setup** (`/setup`): describe your
+shelving in a form *or* plain language ("3 shelving units, 5 shelves
+each, 6 bins per shelf, deep bins have a front and back"), preview every
+generated location ID, create them, print the labels, tick the suppliers
+you actually use, and get a plain explanation of what the API key adds.
+Skippable, resumable, re-runnable — adding another shelving unit later is
+the same flow.
+
+`health` scores your data quality and itemises what needs attention —
+items with no location/price/photo/min-qty/supplier link, stale prices
+(configurable via `RAVENS_NEST_PRICE_STALE_DAYS`), items untouched for a
+year (recount prompt), unresolved BOM lines, empty bins, likely
+duplicates, unpushed sync events — each entry a clickable list with a
+fix flow.
+
+## Duplicates and merging
+
+At capture-confirm time, a fuzzy check across names, part numbers, and
+aliases surfaces near-matches *above* the confirm button — "You have
+'SG90 Micro Servo' in A-1-2 (qty 8) — same thing? [Merge — adds qty]".
+The same check runs on CSV import. `merge` (or `/merge`) scans the whole
+inventory for likely duplicate pairs. Merging sums quantities, transfers
+aliases/links/photo/reservations, makes the source's name an alias on
+the target, keeps the source's history readable from the target, and
+archives the source — never deletes. Different unit types require an
+explicit confirmation; different bins require you to choose which
+location is correct. Every merge is undoable.
+
+## CSV import & export
+
+`/import` takes a CSV (`name` required; `part_number, description,
+unit_type, qty, min_qty, location, last_paid_aud, manufacturer,
+package_type, supplier_url` optional) and always shows a **dry-run
+preview** first: N new, N matched, N ambiguous (with per-row decisions),
+N errors with row numbers and reasons. Nothing is written until
+confirmed, everything is normal events, and resolutions store aliases so
+re-importing the same sheet matches clean.
+
+Export any time: `/export/items.csv` (same columns;
+`?include_archived=1` for retired items) or `/export/full.zip` — the
+complete event log + photos with restore instructions, so you can leave
+with everything.
+
+## Multi-item capture & item labels
+
+One photo of a drawer with six different parts produces six review
+cards — each with its own fields, confidence ratings, questions, and a
+"where in the photo" hint, all sharing the one content-addressed photo.
+Cards are dismissed individually. If the model can't confidently
+separate items it returns one card and says so — it never splits
+speculatively.
+
+`/labels/items` prints item labels (name, qty, home bin, QR) — one, a
+bin's worth, or a selection — in a smaller 4-across format. Item QRs
+encode `RN-ITEM:<id>` and location QRs `RN-LOC:<id>`, so scans are never
+ambiguous (bare old-format location labels still scan fine). Scanning an
+item label jumps straight to its card.
 
 ## Photo capture & identification
 

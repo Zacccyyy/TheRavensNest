@@ -15,7 +15,7 @@ from typing import Any
 
 import qrcode
 import qrcode.image.svg
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import db, store, ui
@@ -24,6 +24,22 @@ from .locations import InvalidLocationId, is_valid_location_id, parse_location_i
 router = APIRouter()
 
 _ITEM_COLUMNS = "items.id, items.name, items.qty_on_hand, items.unit_type, items.location_id, items.part_number"
+
+# QR payload prefixes: item labels and location labels must be
+# unambiguously distinguishable when scanned. Bare location IDs (from
+# labels printed before prefixes existed) still scan fine.
+LOC_PREFIX = "RN-LOC:"
+ITEM_PREFIX = "RN-ITEM:"
+
+
+def normalize_scan(code: str) -> tuple[str, str]:
+    """Classify a scanned payload: ('location'|'item'|'raw', value)."""
+    code = code.strip()
+    if code.upper().startswith(LOC_PREFIX):
+        return "location", code[len(LOC_PREFIX) :].strip()
+    if code.upper().startswith(ITEM_PREFIX):
+        return "item", code[len(ITEM_PREFIX) :].strip()
+    return "raw", code
 
 
 def _ensure_location(location_id: str) -> bool:
@@ -57,15 +73,17 @@ def _location_description(location_id: str) -> str:
 
 def _exact_item_matches(code: str) -> list[dict[str, Any]]:
     """Matches by item ID, part number, or alias — the identifiers a
-    barcode scan produces. These are safe to auto-move on."""
+    barcode scan produces. These are safe to auto-move on. Archived
+    items never match."""
     conn = db.connect()
     try:
         rows = conn.execute(
             f"""SELECT DISTINCT {_ITEM_COLUMNS}
                 FROM items LEFT JOIN aliases ON aliases.item_id = items.id
-                WHERE items.id = :q
+                WHERE items.archived = 0 AND (
+                      items.id = :q
                    OR lower(coalesce(items.part_number, '')) = lower(:q)
-                   OR lower(coalesce(aliases.alias_text, '')) = lower(:q)""",
+                   OR lower(coalesce(aliases.alias_text, '')) = lower(:q))""",
             {"q": code},
         ).fetchall()
         return [dict(row) for row in rows]
@@ -79,10 +97,11 @@ def _search_items(code: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             f"""SELECT DISTINCT {_ITEM_COLUMNS}
                 FROM items LEFT JOIN aliases ON aliases.item_id = items.id
-                WHERE items.name LIKE '%' || :q || '%'
+                WHERE items.archived = 0 AND (
+                      items.name LIKE '%' || :q || '%'
                    OR items.id = :q
                    OR lower(coalesce(items.part_number, '')) = lower(:q)
-                   OR lower(coalesce(aliases.alias_text, '')) = lower(:q)
+                   OR lower(coalesce(aliases.alias_text, '')) = lower(:q))
                 ORDER BY items.name LIMIT 20""",
             {"q": code},
         ).fetchall()
@@ -117,8 +136,44 @@ def labels_sheet(unit: str | None = None) -> str:
         units = [r["unit"] for r in conn.execute("SELECT DISTINCT unit FROM locations ORDER BY unit")]
     finally:
         conn.close()
-    labels = [(dict(row), _qr_svg(row["id"])) for row in rows]
+    labels = [(dict(row), _qr_svg(LOC_PREFIX + row["id"])) for row in rows]
     return ui.labels_page(labels, unit.upper() if unit else None, units)
+
+
+@router.get("/labels/items", response_class=HTMLResponse)
+def item_labels_sheet(
+    location: str | None = None, item_id: list[str] = Query(default=[])
+) -> str:
+    """Printable item labels: one, a bin's worth, or a selection. QR
+    encodes RN-ITEM:<id> so item and location scans never collide."""
+    conn = db.connect()
+    try:
+        if item_id:
+            placeholders = ",".join("?" for _ in item_id)
+            rows = conn.execute(
+                f"SELECT * FROM items WHERE id IN ({placeholders}) ORDER BY name",
+                list(item_id),
+            ).fetchall()
+        elif location:
+            rows = conn.execute(
+                "SELECT * FROM items WHERE location_id = ? AND archived = 0 ORDER BY name",
+                (location,),
+            ).fetchall()
+        else:
+            rows = []
+        all_items = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, name, location_id FROM items WHERE archived = 0 ORDER BY name"
+            )
+        ]
+        bins = [
+            r["id"] for r in conn.execute("SELECT id FROM locations ORDER BY unit, shelf, bin, section")
+        ]
+    finally:
+        conn.close()
+    labels = [(dict(row), _qr_svg(ITEM_PREFIX + row["id"])) for row in rows]
+    return ui.item_labels_page(labels, all_items, bins, location)
 
 
 @router.post("/labels/generate")
@@ -222,12 +277,14 @@ def move_scan(code: str = Form(""), location_id: str = Form("")) -> str:
     """One scan (camera, USB scanner, or typed + Enter). Location codes set
     the target bin; exact item codes move immediately when a target is set;
     anything else becomes a search."""
-    code = code.strip()
     location_id = location_id.strip()
+    scan_kind, code = normalize_scan(code)
     if not code:
         return ""
+    if scan_kind == "location" and not is_valid_location_id(code):
+        return ui.move_note(f"{code!r} is not a valid location ID.", error=True)
 
-    if is_valid_location_id(code):
+    if is_valid_location_id(code) and scan_kind != "item":
         created = _ensure_location(code)
         note = "Target location set to " + code
         if created:

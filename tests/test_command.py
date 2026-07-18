@@ -13,7 +13,9 @@ def _client() -> TestClient:
 
 
 def test_parse_grammar():
-    assert parse("3mm heat shrink") == {"kind": "search", "query": "3mm heat shrink"}
+    assert parse("3mm heat shrink") == {
+        "kind": "search", "query": "3mm heat shrink", "scope": "default",
+    }
     assert parse("A-2-3b") == {"kind": "bin", "location_id": "A-2-3b"}
     assert parse("move to A-2-3b") == {"kind": "move", "location_id": "A-2-3b"}
     assert parse("MOVE A-2-3b") == {"kind": "move", "location_id": "A-2-3b"}
@@ -46,7 +48,9 @@ def test_search_shows_stock_summary_in_spec_format(data_dir):
 
 
 def test_search_matches_aliases_and_part_numbers(data_dir):
-    item = store.create_item("Hex bolt M6", "each", part_number="HB-M6")["payload"]["id"]
+    item = store.create_item(
+        "Hex bolt M6", "each", qty_on_hand=5, part_number="HB-M6"
+    )["payload"]["id"]
     store.match_bom_line("some-project", 1, item, "manual", alias_text="BOLT-HEX-6")
     client = _client()
     assert "Hex bolt M6" in client.get("/command", params={"q": "hb-m6"}).text
@@ -237,11 +241,11 @@ def test_item_card_shows_everything(data_dir):
     assert ">0<" in page  # free = 8 on hand - 8 reserved
     assert "4.5" in page  # last paid
     assert "Jaycar" in page and "SM-SG90" in page  # supplier links
-    # Event history for the item:
-    assert "item.created" in page
-    assert "-2 (used in prototype)" in page
-    assert "moved to B-1-1" in page
-    assert "reserved 8" in page
+    # Event history — narrated, with actor and prior locations:
+    assert "Created with 10 each in A-2-3b" in page
+    assert "used in prototype" in page  # "Adjusted -2, reason: '...'"
+    assert "Moved A-2-3b → B-1-1" in page
+    assert "Reserved 8 for Hexapod" in page
 
 
 # ------------------------------------------------------------ entry points

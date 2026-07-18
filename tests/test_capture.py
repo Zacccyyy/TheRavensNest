@@ -9,7 +9,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"fake image bytes"
 
 @pytest.fixture
 def mock_vision(monkeypatch):
-    """Replace the API call with a canned extraction; returns the call log."""
+    """Replace the API call with a canned single-item extraction."""
     calls = []
 
     def fake(image_bytes):
@@ -18,13 +18,16 @@ def mock_vision(monkeypatch):
         fields["name"] = {"value": "M3 screw", "confidence": "high"}
         fields["unit_type"] = {"value": "each", "confidence": "high"}
         fields["qty_visible"] = {"value": "25", "confidence": "medium"}
-        return {
-            "fields": fields,
-            "questions": [{"field": "part_number", "question": "What length?"}],
-            "error": None,
-        }
+        return [
+            {
+                "fields": fields,
+                "questions": [{"field": "part_number", "question": "What length?"}],
+                "photo_region": None,
+                "error": None,
+            }
+        ]
 
-    monkeypatch.setattr(vision, "extract_fields", fake)
+    monkeypatch.setattr(vision, "extract_items", fake)
     return calls
 
 
