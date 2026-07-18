@@ -1,0 +1,15 @@
+# ── Personal inventory data — NEVER committed to this (code) repo. ──
+# The app is public; your inventory is private. Everything under data/
+# (event log, photos, cache, capture queue) stays on your machine, or in
+# your own separate private data repo — see README → "Your data stays
+# yours".
+data/
+
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
