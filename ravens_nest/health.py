@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import bom, db, merge
+from . import bom, db, events, merge
 
 PRICE_STALE_DAYS_DEFAULT = 90
 UNTOUCHED_MONTHS = 12
@@ -99,6 +99,7 @@ def report(conn) -> dict[str, Any]:
     return {
         "score": score,
         "total_items": total,
+        "quarantined": events.quarantined_count(),
         "checks": checks,
         "stale_prices": stale_prices,
         "stale_days": price_stale_days(),

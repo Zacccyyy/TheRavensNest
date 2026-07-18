@@ -623,6 +623,15 @@ def health_panel(report: dict[str, Any], sync: dict[str, Any]) -> str:
             f"</p></details>"
         )
 
+    quarantined = report.get("quarantined", 0)
+    if quarantined:
+        sections += (
+            f'<div class="note error"><strong>{quarantined}</strong> quarantined event '
+            f"line(s) — corrupt data was set aside in data/events/quarantine-*.txt "
+            f"during replay. Inspect those files to recover or discard the lines; "
+            f"the rest of the log applied normally.</div>"
+        )
+
     unpushed = sync.get("unpushed_events")
     if sync.get("has_remote") and unpushed:
         sync_line = f"{unpushed} unpushed event(s) — <a href='/sync/status'>sync status</a>"
