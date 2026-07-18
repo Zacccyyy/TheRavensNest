@@ -325,3 +325,80 @@ def test_c3_add_link_route_rejects_bad_scheme(data_dir):
     )
     assert response.status_code == 400
     assert "http" in response.json()["detail"]  # states what's expected
+
+
+# ------------------------------------------------------------------ H2
+
+QTY_MSG = "plain numbers like 8 or 12.5"
+
+
+def test_h2_basket_add_garbage_qty_is_friendly(data_dir):
+    from ravens_nest import store
+
+    item = store.create_item("Widget", "each")["payload"]["id"]
+    response = _client().post("/reorder/add", data={"item_id": item, "qty": "a few"})
+    assert response.status_code == 200
+    assert QTY_MSG in response.text
+    assert "Reorder basket" in response.text  # re-rendered, not a 500
+
+
+def test_h2_receive_order_garbage_qty_and_price_are_friendly(data_dir):
+    from ravens_nest import db, store
+
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    conn = db.connect()
+    supplier = conn.execute("SELECT id FROM suppliers LIMIT 1").fetchone()[0]
+    conn.close()
+    item = store.create_item("Widget", "each")["payload"]["id"]
+
+    response = client.post(
+        "/orders/receive",
+        data={"supplier_id": supplier, "reliability": "",
+              "item_id": [item], "qty": ["5x"], "unit_price": [""]},
+    )
+    assert response.status_code == 200 and QTY_MSG in response.text
+
+    response = client.post(
+        "/orders/receive",
+        data={"supplier_id": supplier, "reliability": "",
+              "item_id": [item], "qty": ["5"], "unit_price": ["about 4"]},
+    )
+    assert response.status_code == 200 and QTY_MSG in response.text
+    # Nothing half-applied on the price failure? The qty event fires before
+    # the price parse per line — assert the guard runs before any write.
+    conn = db.connect()
+    qty = conn.execute("SELECT qty_on_hand FROM items WHERE id = ?", (item,)).fetchone()[0]
+    conn.close()
+    assert qty == "0"
+
+
+def test_h2_supplier_update_garbage_numbers_are_friendly(data_dir):
+    from ravens_nest import db
+
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    conn = db.connect()
+    supplier = conn.execute("SELECT id FROM suppliers LIMIT 1").fetchone()[0]
+    conn.close()
+    response = client.post(
+        f"/suppliers/{supplier}",
+        data={"reliability": "", "free_shipping_threshold_aud": "free over $99",
+              "typical_shipping_aud": "", "typical_lead_days": ""},
+    )
+    assert response.status_code == 200 and QTY_MSG in response.text
+    response = client.post(
+        f"/suppliers/{supplier}",
+        data={"reliability": "", "free_shipping_threshold_aud": "",
+              "typical_shipping_aud": "", "typical_lead_days": "a week"},
+    )
+    assert response.status_code == 200 and "whole number" in response.text
+
+
+def test_h2_command_need_garbage_qty_is_friendly(data_dir):
+    from ravens_nest import store
+
+    item = store.create_item("Widget", "each")["payload"]["id"]
+    response = _client().post("/command/need", data={"item_id": item, "qty": "lots"})
+    assert response.status_code == 200
+    assert QTY_MSG in response.text

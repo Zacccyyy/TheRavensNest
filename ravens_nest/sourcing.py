@@ -10,7 +10,7 @@ time. Identical outcomes are deduplicated before display.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException
@@ -299,19 +299,36 @@ def update_supplier(
         if not 1 <= rating <= 5:
             raise HTTPException(status_code=400, detail="reliability must be 1-5")
         fields["reliability"] = rating
-    fields["free_shipping_threshold_aud"] = (
-        db.qty_str(db.parse_qty(free_shipping_threshold_aud))
-        if free_shipping_threshold_aud.strip()
-        else None
-    )
-    fields["typical_shipping_aud"] = (
-        db.qty_str(db.parse_qty(typical_shipping_aud))
-        if typical_shipping_aud.strip()
-        else None
-    )
-    fields["typical_lead_days"] = (
-        int(typical_lead_days) if typical_lead_days.strip() else None
-    )
+    def _suppliers_error(message: str) -> HTMLResponse:
+        conn = db.connect()
+        try:
+            suppliers = [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name")]
+        finally:
+            conn.close()
+        return HTMLResponse(ui_sourcing.suppliers_page(suppliers, error=message))
+
+    try:
+        fields["free_shipping_threshold_aud"] = (
+            db.qty_str(db.parse_qty(free_shipping_threshold_aud))
+            if free_shipping_threshold_aud.strip()
+            else None
+        )
+        fields["typical_shipping_aud"] = (
+            db.qty_str(db.parse_qty(typical_shipping_aud))
+            if typical_shipping_aud.strip()
+            else None
+        )
+    except (InvalidOperation, TypeError):
+        return _suppliers_error(
+            "Shipping threshold and cost must be plain numbers like 99 or 7.50 "
+            "(quantities are plain numbers like 8 or 12.5)."
+        )
+    try:
+        fields["typical_lead_days"] = (
+            int(typical_lead_days) if typical_lead_days.strip() else None
+        )
+    except ValueError:
+        return _suppliers_error("Lead days must be a whole number like 3.")
     store.update_supplier(supplier_id, **fields)
     return RedirectResponse(url="/suppliers", status_code=303)
 
@@ -365,8 +382,7 @@ def add_link(
 # ---------------------------------------------------------------- basket
 
 
-@router.get("/reorder", response_class=HTMLResponse)
-def reorder_page() -> str:
+def _basket_view(error: str | None = None) -> str:
     conn = db.connect()
     try:
         entries = assemble_basket(conn)
@@ -375,12 +391,20 @@ def reorder_page() -> str:
         ]
     finally:
         conn.close()
-    return ui_sourcing.basket_page(entries, candidate_baskets(entries), items)
+    return ui_sourcing.basket_page(entries, candidate_baskets(entries), items, error=error)
+
+
+@router.get("/reorder", response_class=HTMLResponse)
+def reorder_page() -> str:
+    return _basket_view()
 
 
 @router.post("/reorder/add")
-def basket_add(item_id: str = Form(...), qty: str = Form("1")) -> RedirectResponse:
-    store.add_basket_item(item_id, qty.strip() or "1")
+def basket_add(item_id: str = Form(...), qty: str = Form("1")):
+    try:
+        store.add_basket_item(item_id, qty.strip() or "1")
+    except (InvalidOperation, TypeError):
+        return HTMLResponse(_basket_view(error=f"{qty!r} isn't a quantity — quantities are plain numbers like 8 or 12.5."))
     return RedirectResponse(url="/reorder", status_code=303)
 
 
@@ -481,17 +505,36 @@ def receive_order(
     finally:
         conn.close()
 
+    def _receive_error(message: str) -> HTMLResponse:
+        conn = db.connect()
+        try:
+            suppliers = [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name")]
+            items = [dict(r) for r in conn.execute(
+                "SELECT id, name, unit_type FROM items WHERE archived = 0 ORDER BY name")]
+        finally:
+            conn.close()
+        return HTMLResponse(ui_sourcing.receive_order_page(suppliers, items, error=message))
+
     received = 0
     for line_item, line_qty, line_price in zip(item_id, qty, unit_price):
         if not line_item.strip() or not line_qty.strip():
             continue
-        quantity = db.parse_qty(line_qty)
+        try:
+            quantity = db.parse_qty(line_qty)
+        except (InvalidOperation, TypeError):
+            return _receive_error(
+                f"{line_qty!r} isn't a quantity — quantities are plain numbers like 8 or 12.5."
+            )
         if quantity <= 0:
             continue
         if line_price.strip():
-            store.update_item(
-                line_item, last_paid_aud=db.qty_str(db.parse_qty(line_price))
-            )
+            try:
+                paid = db.qty_str(db.parse_qty(line_price))
+            except (InvalidOperation, TypeError):
+                return _receive_error(
+                    f"{line_price!r} isn't a price — quantities are plain numbers like 8 or 12.5."
+                )
+            store.update_item(line_item, last_paid_aud=paid)
         store.adjust_qty(
             line_item, quantity, f"order received: {supplier['name']}"
         )

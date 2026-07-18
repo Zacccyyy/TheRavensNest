@@ -618,7 +618,13 @@ def command_execute(q: str = Form("")) -> str:
 
 @router.post("/command/need", response_class=HTMLResponse)
 def command_need(item_id: str = Form(...), qty: str = Form(...)) -> str:
-    return _add_to_basket(item_id, qty)
+    try:
+        return _add_to_basket(item_id, qty)
+    except (InvalidOperation, TypeError):
+        return ui_command.note(
+            f"{qty!r} isn't a quantity — quantities are plain numbers like 8 or 12.5.",
+            error=True,
+        )
 
 
 @router.post("/command/build", response_class=HTMLResponse)

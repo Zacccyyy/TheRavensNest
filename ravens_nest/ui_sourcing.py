@@ -24,7 +24,8 @@ def _stars(rating: Any) -> str:
     return f'<span class="stars">{"★" * int(rating)}{"☆" * (5 - int(rating))}</span>'
 
 
-def suppliers_page(suppliers: list[dict[str, Any]]) -> str:
+def suppliers_page(suppliers: list[dict[str, Any]], error: str | None = None) -> str:
+    banner = f'<div class="note error">{_e(error)}</div>' if error else ""
     if suppliers:
         rows = []
         for s in suppliers:
@@ -62,6 +63,7 @@ def suppliers_page(suppliers: list[dict[str, Any]]) -> str:
 </form>"""
     body = f"""{_NAV}{_TABLE_STYLE}{_EXTRA_STYLE}
 <h1>Suppliers</h1>
+{banner}
 {table}
 <p><a href="/orders/receive">Record a received order</a></p>"""
     return page("The Raven's Nest — Suppliers", body)
@@ -152,8 +154,10 @@ def basket_page(
     items: list[dict[str, Any]],
     notice: str | None = None,
     stale_notes: list[str] | None = None,
+    error: str | None = None,
 ) -> str:
-    banner = f'<div class="note">{_e(notice)}</div>' if notice else ""
+    banner = f'<div class="note error">{_e(error)}</div>' if error else ""
+    banner += f'<div class="note">{_e(notice)}</div>' if notice else ""
     if stale_notes:
         banner += "".join(
             f'<div class="stale">stale: {_e(note)}</div>' for note in stale_notes
@@ -229,8 +233,10 @@ def basket_page(
 
 
 def receive_order_page(
-    suppliers: list[dict[str, Any]], items: list[dict[str, Any]]
+    suppliers: list[dict[str, Any]], items: list[dict[str, Any]],
+    error: str | None = None,
 ) -> str:
+    banner = f'<div class="note error">{_e(error)}</div>' if error else ""
     supplier_options = "".join(
         f'<option value="{_e(s["id"])}">{_e(s["name"])}</option>' for s in suppliers
     )
@@ -248,6 +254,7 @@ def receive_order_page(
     )
     body = f"""{_NAV}{_TABLE_STYLE}{_EXTRA_STYLE}
 <h1>Record received order</h1>
+{banner}
 <p class="count">Sets each item's last paid price, adds the received stock
 (qty_adjusted events), and prompts for the supplier's reliability rating.</p>
 <form method="post" action="/orders/receive">
