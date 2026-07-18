@@ -56,6 +56,9 @@ EVENT_TYPES = frozenset(
 )
 
 
+SCHEMA_VERSION = 1
+
+
 def new_event(type: str, payload: dict[str, Any]) -> dict[str, Any]:
     if type not in EVENT_TYPES:
         raise ValueError(f"unknown event type {type!r}")
@@ -64,6 +67,11 @@ def new_event(type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "ts": datetime.now(timezone.utc).isoformat(),
         "actor": socket.gethostname(),
         "type": type,
+        # Envelope schema version (audit item 10c). Events written before
+        # this field exist with no "v" and are treated as v1 — the point
+        # is a branch spot for the first future payload-shape change,
+        # not behaviour today. Never rewrite existing events.
+        "v": SCHEMA_VERSION,
         "payload": payload,
     }
 

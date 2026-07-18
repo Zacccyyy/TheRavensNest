@@ -404,6 +404,67 @@ def test_h2_command_need_garbage_qty_is_friendly(data_dir):
     assert QTY_MSG in response.text
 
 
+# ------------------------------------------------ enforcement (item 10)
+
+
+def test_10a_every_event_type_has_an_undo_registration():
+    """A new event type must be declared undoable (with an inverse) or
+    explicitly not-undoable (with a reason) — it cannot silently miss the
+    undo system."""
+    from ravens_nest import undo
+    from ravens_nest.events import EVENT_TYPES
+
+    registered = undo.UNDOABLE | set(undo.NOT_UNDOABLE_REASONS)
+    missing = EVENT_TYPES - registered
+    assert missing == set(), (
+        f"event type(s) {sorted(missing)} are registered in neither "
+        f"undo.UNDOABLE nor undo.NOT_UNDOABLE_REASONS"
+    )
+
+
+def test_10b_every_event_type_narrates_without_raising():
+    """history.narrate must produce SOME line for every event type, even
+    with an empty payload — a generic fallback, never an exception."""
+    from ravens_nest import history
+    from ravens_nest.events import EVENT_TYPES
+
+    for event_type in sorted(EVENT_TYPES):
+        line = history.narrate(
+            {"type": event_type, "payload": {}, "ts": "2026-07-19T00:00:00+00:00"},
+            {},
+        )
+        assert isinstance(line, str) and line, f"no narration for {event_type}"
+    # Unknown/future types get the generic line rather than a crash.
+    line = history.narrate({"type": "future.event", "payload": {}}, {})
+    assert "future.event" in line
+
+
+def test_10c_schema_version_on_new_events_and_v1_default(data_dir):
+    from ravens_nest import db, events, replay
+
+    event = events.new_event("item.created", {"id": "x", "name": "N", "unit_type": "each"})
+    assert event["v"] == 1
+
+    # A pre-versioning event (no "v") still applies — defaulted to v1.
+    legacy = {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "ts": "2026-01-01T00:00:00+00:00",
+        "actor": "old-machine",
+        "type": "item.created",
+        "payload": {"id": "legacy-item", "name": "Legacy", "unit_type": "each"},
+    }
+    events.append_to_log(legacy)
+    conn = db.connect()
+    with conn:
+        assert replay.apply_event(conn, legacy) is True
+    row = conn.execute("SELECT name FROM items WHERE id = 'legacy-item'").fetchone()
+    conn.close()
+    assert row["name"] == "Legacy"
+    # And full replay (mixed v1 / no-v log) stays deterministic.
+    count = replay.rebuild()
+    assert count == 1
+
+
 # ------------------------------------------------------------------ H6
 
 

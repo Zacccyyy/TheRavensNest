@@ -37,6 +37,15 @@ def apply_event(conn: sqlite3.Connection, event: dict[str, Any]) -> bool:
     if cur.rowcount == 0:
         return False
 
+    # Envelope schema version: events without "v" predate the field and
+    # are v1. When a payload shape ever changes, branch on this here.
+    version = event.get("v", 1)
+    if version > events.SCHEMA_VERSION:
+        log.warning(
+            "event %s has schema v%s (this build understands v%s) — applying "
+            "best-effort; update the app on this machine",
+            event["id"], version, events.SCHEMA_VERSION,
+        )
     handler = _HANDLERS.get(event["type"])
     if handler is None:
         log.warning("skipping event %s: unknown type %r", event["id"], event["type"])

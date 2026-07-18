@@ -54,8 +54,18 @@ def _touches_item(event: dict, ids: set[str]) -> bool:
 
 
 def narrate(event: dict, context: dict[str, Any]) -> str:
-    """One human-readable line for an event. context: item_names,
-    project_names, location_before (per this event, may be None)."""
+    """One human-readable line for an event. Never raises: a payload
+    shape this narrator doesn't understand (new event type, evolved
+    payload) falls back to a generic line rather than breaking every
+    history view (audit item 10b)."""
+    try:
+        return _narrate(event, context)
+    except Exception:
+        return f"{event.get('type', 'unknown')} event (no narration available)"
+
+
+def _narrate(event: dict, context: dict[str, Any]) -> str:
+    """context: item_names, project_names, location_before (may be None)."""
     p = event["payload"]
     kind = event["type"]
     item_names = context.get("item_names", {})

@@ -43,6 +43,7 @@ NOT_UNDOABLE_REASONS = {
     "item.link_added": "edit the link on the item's sourcing page instead",
     "item.link_price_checked": "run 'price basket' again for a fresh price",
     "location.created": "an unused location record is harmless; it just sits empty",
+    "location.updated": "set the description back on /locations — it's a plain text field",
     "supplier.created": "unused suppliers are harmless; edit them on /suppliers",
     "supplier.updated": "set the field back on /suppliers",
     "project.created": "an empty project is harmless; it holds no stock",
