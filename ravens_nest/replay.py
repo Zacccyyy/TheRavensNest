@@ -383,6 +383,11 @@ def _apply_item_merged(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -> 
         conn.execute(
             "UPDATE reservations SET item_id = ? WHERE id = ?", (target, reservation_id)
         )
+    for ref in p.get("bom_line_refs", []):  # audit H1: BOM lines follow the stock
+        conn.execute(
+            "UPDATE bom_lines SET item_id = ? WHERE project_id = ? AND line_no = ?",
+            (target, ref["project_id"], ref["line_no"]),
+        )
     conn.execute(
         "UPDATE items SET qty_on_hand = '0', archived = 1, updated_ts = ? WHERE id = ?",
         (ts, source),
@@ -423,6 +428,11 @@ def _apply_item_unmerged(conn: sqlite3.Connection, ts: str, p: dict[str, Any]) -
     for reservation_id in p.get("reservation_ids", []):
         conn.execute(
             "UPDATE reservations SET item_id = ? WHERE id = ?", (source, reservation_id)
+        )
+    for ref in p.get("bom_line_refs", []):  # audit H1: restore the BOM refs
+        conn.execute(
+            "UPDATE bom_lines SET item_id = ? WHERE project_id = ? AND line_no = ?",
+            (source, ref["project_id"], ref["line_no"]),
         )
     conn.execute(
         "UPDATE items SET qty_on_hand = ?, archived = 0, location_id = ?, updated_ts = ? WHERE id = ?",

@@ -125,6 +125,16 @@ def build_merge_payload(
             (source_id,),
         )
     ]
+    # Audit H1: BOM lines matched to the source must follow the stock to
+    # the target, or every later build reports phantom shortages against
+    # an archived qty-0 item. Recorded here (write time) so the applier
+    # and unmerge stay payload-driven and deterministic.
+    bom_line_refs = [
+        {"project_id": r["project_id"], "line_no": r["line_no"]}
+        for r in conn.execute(
+            "SELECT project_id, line_no FROM bom_lines WHERE item_id = ?", (source_id,)
+        )
+    ]
     photo_transferred = bool(source["photo_hash"]) and not target["photo_hash"]
     payload = {
         "source_id": source_id,
@@ -137,6 +147,7 @@ def build_merge_payload(
         "aliases": aliases,
         "link_suppliers": link_suppliers,
         "reservation_ids": reservation_ids,
+        "bom_line_refs": bom_line_refs,
         "location_id": location_id,
         "target_prev_location": target_loc,
         "source_prev_location": source_loc,

@@ -402,3 +402,63 @@ def test_h2_command_need_garbage_qty_is_friendly(data_dir):
     response = _client().post("/command/need", data={"item_id": item, "qty": "lots"})
     assert response.status_code == 200
     assert QTY_MSG in response.text
+
+
+# ------------------------------------------------------------------ H1
+
+
+def test_h1_merge_repoints_bom_lines_and_unmerge_restores(data_dir):
+    from ravens_nest import bom, db, merge, replay, store, undo
+
+    a = store.create_item("sg90 dupe", "each", qty_on_hand=3)["payload"]["id"]
+    b = store.create_item("SG90 servo", "each", qty_on_hand=4)["payload"]["id"]
+    pid = store.create_project("Bot")["payload"]["id"]
+    store.import_bom(pid, [{
+        "line_no": 1, "part_number": "SG90", "description": "servo",
+        "quantity": "2", "unit": "each", "reference_designators": None, "notes": None,
+    }])
+    store.match_bom_line(pid, 1, a, "manual")
+
+    ok, message, merge_event = merge.perform_merge(a, b, None)
+    assert ok, message
+
+    conn = db.connect()
+    line = conn.execute(
+        "SELECT item_id FROM bom_lines WHERE project_id = ? AND line_no = 1", (pid,)
+    ).fetchone()
+    conn.close()
+    assert line["item_id"] == b  # the BOM line followed the stock
+
+    # A build now succeeds against the target's combined stock (3+4 = 7).
+    ok, message, _ = bom.attempt_build(pid, 3)  # needs 6
+    assert ok, message
+    conn = db.connect()
+    qty = conn.execute("SELECT qty_on_hand FROM items WHERE id = ?", (b,)).fetchone()[0]
+    conn.close()
+    assert qty == "1"
+
+    # Undo the build, then unmerge — the BOM ref returns to A.
+    assert undo.perform_undo(undo.undo_stack()[0]["id"])[0] is True
+    ok, message = undo.perform_undo(merge_event)
+    assert ok, message
+    conn = db.connect()
+    line = conn.execute(
+        "SELECT item_id FROM bom_lines WHERE project_id = ? AND line_no = 1", (pid,)
+    ).fetchone()
+    conn.close()
+    assert line["item_id"] == a
+
+    # Replay determinism with the enriched payload in the log.
+    def snapshot():
+        conn = db.connect()
+        try:
+            return {
+                table: sorted(tuple(r) for r in conn.execute(f"SELECT * FROM {table}"))
+                for table in ("items", "bom_lines", "aliases", "reservations", "builds")
+            }
+        finally:
+            conn.close()
+
+    before = snapshot()
+    replay.rebuild()
+    assert snapshot() == before
