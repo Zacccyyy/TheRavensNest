@@ -623,6 +623,17 @@ def health_panel(report: dict[str, Any], sync: dict[str, Any]) -> str:
             f"</p></details>"
         )
 
+    gps_assets = report.get("assets_with_gps", [])
+    if gps_assets:
+        names = ", ".join(gps_assets[:5])
+        more = f" (+{len(gps_assets) - 5} more)" if len(gps_assets) > 5 else ""
+        sections += (
+            f'<div class="note error"><strong>{len(gps_assets)}</strong> photo(s) still '
+            f"carry GPS location tags (taken before EXIF stripping): {_e(names)}{more}. "
+            f"Re-uploading each photo stores a clean copy — new captures are always "
+            f"stripped automatically.</div>"
+        )
+
     quarantined = report.get("quarantined", 0)
     if quarantined:
         sections += (

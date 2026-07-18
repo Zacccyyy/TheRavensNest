@@ -10,6 +10,7 @@ files under data/pending/ so they survive cache rebuilds.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 from datetime import datetime, timezone
@@ -27,8 +28,40 @@ def asset_path(photo_hash: str) -> Path:
     return config.assets_dir() / f"{photo_hash}.jpg"
 
 
+def sanitize_image(data: bytes) -> bytes:
+    """Re-encode a photo through Pillow with NO metadata (audit C4).
+
+    Phone photos routinely carry EXIF GPS — those bytes get committed to
+    git, served on the LAN, and zipped into exports, so the location tags
+    must die here, before hashing. Re-encoding also normalises truncated
+    files. If Pillow can't parse the bytes at all we store them verbatim:
+    unparseable data has no parseable EXIF either, and the queue's
+    blank-card path still wants the photo preserved.
+    """
+    from PIL import Image, ImageFile, ImageOps
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    try:
+        image = Image.open(io.BytesIO(data))
+        # Bake the EXIF orientation into the pixels BEFORE dropping EXIF,
+        # or portrait phone photos would render sideways.
+        image = ImageOps.exif_transpose(image)
+        image = image.convert("RGB")
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=90)  # no exif= → metadata gone
+        return out.getvalue()
+    except Exception as exc:
+        log.warning("could not re-encode photo (%s) — storing bytes as-is", exc)
+        return data
+
+
 def store_asset(data: bytes) -> tuple[str, bool]:
-    """Store a photo content-addressed. Returns (sha256, already_existed)."""
+    """Sanitize (EXIF stripped) and store a photo content-addressed.
+    Returns (sha256, already_existed). The hash is of the SANITIZED
+    bytes, so the same source photo re-uploaded still deduplicates.
+    Existing assets from before EXIF stripping are left untouched —
+    the health dashboard flags any that still carry GPS."""
+    data = sanitize_image(data)
     photo_hash = hashlib.sha256(data).hexdigest()
     path = asset_path(photo_hash)
     if path.exists():

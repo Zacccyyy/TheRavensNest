@@ -128,3 +128,83 @@ def test_c2_json_valid_but_not_an_envelope_is_quarantined(data_dir):
         f.write('{"just": "some dict", "no": "envelope keys"}\n')
     assert len(events.read_all_events()) == 1
     assert events.quarantined_count() == 1
+
+
+# ------------------------------------------------------------------ C4
+
+
+def _jpeg_with_exif() -> bytes:
+    """A real JPEG carrying EXIF (including a GPS IFD where Pillow will
+    write one)."""
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (32, 32), "red")
+    exif = Image.Exif()
+    exif[271] = "TestCam"  # Make
+    exif[306] = "2026:07:19 12:00:00"  # DateTime
+    exif[34853] = {  # GPSInfo IFD: 33°51'S 151°12'E-ish (floats → rationals)
+        1: "S",
+        2: (33.0, 51.0, 0.0),
+        3: "E",
+        4: (151.0, 12.0, 0.0),
+    }
+    out = io.BytesIO()
+    image.save(out, format="JPEG", exif=exif)
+    return out.getvalue()
+
+
+def test_c4_exif_and_gps_stripped_at_ingest(data_dir, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    from ravens_nest import ingest, vision
+
+    monkeypatch.setattr(
+        vision,
+        "extract_items",
+        lambda data: [vision.blank_extraction("no key in test")],
+    )
+    original = _jpeg_with_exif()
+    # Sanity: the source really carries EXIF before we claim we stripped it.
+    assert len(Image.open(io.BytesIO(original)).getexif()) > 0
+
+    result = ingest.ingest_photo(original)
+    stored = ingest.asset_path(result["photo_hash"]).read_bytes()
+    stored_exif = Image.open(io.BytesIO(stored)).getexif()
+    assert len(stored_exif) == 0  # ALL metadata gone from the stored bytes
+    assert len(stored_exif.get_ifd(0x8825)) == 0  # GPS specifically
+    # Dedup still works: the same source photo re-ingested hits the same hash.
+    again = ingest.ingest_photo(original)
+    assert again["status"] == "duplicate_pending"
+    assert again["photo_hash"] == result["photo_hash"]
+
+
+def test_c4_corrupt_image_is_handled_not_raised(data_dir, monkeypatch):
+    from ravens_nest import ingest, vision
+
+    monkeypatch.setattr(
+        vision,
+        "extract_items",
+        lambda data: [vision.blank_extraction("no key in test")],
+    )
+    garbage = b"\xff\xd8\xff\xe0" + b"definitely not decodable image data"
+    result = ingest.ingest_photo(garbage)  # must not raise
+    assert result["status"] == "new"
+    assert ingest.asset_path(result["photo_hash"]).exists()
+
+    truncated = _jpeg_with_exif()[: len(_jpeg_with_exif()) // 2]
+    result = ingest.ingest_photo(truncated)  # truncated real JPEG: also fine
+    assert result["status"] == "new"
+
+
+def test_c4_health_flags_legacy_assets_with_gps(data_dir):
+    from ravens_nest import config, health
+
+    config.assets_dir().mkdir(parents=True, exist_ok=True)
+    # Simulate a pre-fix asset: written directly, bypassing sanitize.
+    (config.assets_dir() / ("ab" * 32 + ".jpg")).write_bytes(_jpeg_with_exif())
+    flagged = health.assets_with_gps()
+    assert flagged == ["ab" * 32 + ".jpg"]

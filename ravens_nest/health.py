@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import bom, db, events, merge
+from . import bom, config, db, events, merge
 
 PRICE_STALE_DAYS_DEFAULT = 90
 UNTOUCHED_MONTHS = 12
@@ -100,6 +100,7 @@ def report(conn) -> dict[str, Any]:
         "score": score,
         "total_items": total,
         "quarantined": events.quarantined_count(),
+        "assets_with_gps": assets_with_gps(),
         "checks": checks,
         "stale_prices": stale_prices,
         "stale_days": price_stale_days(),
@@ -111,6 +112,28 @@ def report(conn) -> dict[str, Any]:
             if reserved.get(i["id"]) and reserved[i["id"]] > db.parse_qty(i["qty_on_hand"])
         ],
     }
+
+
+def assets_with_gps() -> list[str]:
+    """Assets from before EXIF stripping (audit C4) that still carry GPS
+    tags. New ingests are always clean; re-uploading an old photo clears
+    it (the sanitized bytes get a new hash)."""
+    directory = config.assets_dir()
+    if not directory.is_dir():
+        return []
+    flagged = []
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+    for path in sorted(directory.glob("*.jpg")):
+        try:
+            with Image.open(path) as image:
+                if image.getexif().get_ifd(0x8825):  # GPSInfo IFD
+                    flagged.append(path.name)
+        except Exception:
+            continue  # unreadable asset ≠ GPS leak
+    return flagged
 
 
 def sync_summary() -> dict[str, Any]:
