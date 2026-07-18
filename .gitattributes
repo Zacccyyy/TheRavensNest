@@ -1,0 +1,24 @@
+# Normalise every text file to LF in the repository so Windows, macOS, and
+# Linux clones are byte-identical — no CRLF surprises when the same repo is
+# used across machines (which is the whole point of the git-sync feature).
+* text=auto eol=lf
+
+# Source and vendored assets are text; keep them LF on every platform.
+*.py   text eol=lf
+*.js   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.jsonl text eol=lf
+
+# Binary assets must never be line-ending converted or diffed as text.
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.db   binary
