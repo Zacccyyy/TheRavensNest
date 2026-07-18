@@ -414,16 +414,39 @@ def basket_remove(item_id: str = Form(...)) -> RedirectResponse:
     return RedirectResponse(url="/reorder", status_code=303)
 
 
+def _price_ratio_bounds() -> tuple[Decimal, Decimal]:
+    """Audit H6: a scraped price wildly different from the stored one is
+    far more likely a wrong parse (page redesign, unrelated 'price' key)
+    than a real repricing — reject it and keep the old value."""
+    import os
+
+    def _env_decimal(name: str, default: str) -> Decimal:
+        try:
+            return Decimal(os.environ.get(name, default))
+        except InvalidOperation:
+            return Decimal(default)
+
+    return (
+        _env_decimal("RAVENS_NEST_PRICE_RATIO_MIN", "0.2"),
+        _env_decimal("RAVENS_NEST_PRICE_RATIO_MAX", "5"),
+    )
+
+
 def run_pricing() -> tuple[int, int, list[str]]:
     """Price every basket item's links now. Returns (updated, total,
-    stale_notes). Shared by the basket page and the command bar."""
+    stale_notes). Shared by the basket page and the command bar.
+
+    Note: this only ever writes item_links.last_price_aud (via
+    item.link_price_checked events) — items.last_paid_aud is what you
+    actually paid and is never touched by scraping."""
     conn = db.connect()
     try:
         entries = assemble_basket(conn)
         links = []
         for entry in entries:
             for row in conn.execute(
-                """SELECT l.item_id, l.supplier_id, l.url, s.name AS supplier_name
+                """SELECT l.item_id, l.supplier_id, l.url, l.last_price_aud,
+                          s.name AS supplier_name
                    FROM item_links l JOIN suppliers s ON s.id = l.supplier_id
                    WHERE l.item_id = ?""",
                 (entry["id"],),
@@ -432,17 +455,28 @@ def run_pricing() -> tuple[int, int, list[str]]:
     finally:
         conn.close()
 
+    ratio_min, ratio_max = _price_ratio_bounds()
     results = pricing.price_links(links)
     stale: list[str] = []
     updated = 0
     for result in results:
-        if result["outcome"] == "ok":
-            store.record_link_price(
-                result["item_id"], result["supplier_id"], result["price"]
-            )
-            updated += 1
-        else:
+        if result["outcome"] != "ok":
             stale.append(f"{result['supplier_name']}: {result['detail']}")
+            continue
+        new_price = db.parse_qty(result["price"])
+        stored = result.get("last_price_aud")
+        if stored is not None:
+            old_price = db.parse_qty(stored)
+            if old_price > 0 and (
+                new_price > old_price * ratio_max or new_price < old_price * ratio_min
+            ):
+                stale.append(
+                    f"{result['supplier_name']}: found ${_money(new_price)}, previously "
+                    f"${_money(old_price)} — kept old price, check the link"
+                )
+                continue
+        store.record_link_price(result["item_id"], result["supplier_id"], new_price)
+        updated += 1
     return updated, len(results), stale
 
 

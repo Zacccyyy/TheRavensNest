@@ -404,6 +404,93 @@ def test_h2_command_need_garbage_qty_is_friendly(data_dir):
     assert QTY_MSG in response.text
 
 
+# ------------------------------------------------------------------ H6
+
+
+def _priced_link(price="4.50"):
+    from ravens_nest import db, store
+
+    client = _client()
+    client.post("/suppliers/seed", follow_redirects=False)
+    conn = db.connect()
+    supplier = conn.execute(
+        "SELECT id FROM suppliers WHERE name='Core Electronics'"
+    ).fetchone()[0]
+    conn.close()
+    item = store.create_item("Servo", "each", qty_on_hand=0, min_qty=2)["payload"]["id"]
+    store.add_item_link(item, supplier, "https://core.example/sg90", last_price_aud=price)
+    return item, supplier
+
+
+def test_h6_wildly_different_price_is_rejected_and_noted(data_dir, monkeypatch):
+    from ravens_nest import db, pricing, sourcing
+
+    item, supplier = _priced_link("4.50")
+    # A page redesign: the parser grabs a shipping fee.
+    monkeypatch.setattr(
+        pricing, "fetch_url", lambda url: '<meta itemprop="price" content="0.10">'
+    )
+    updated, total, stale = sourcing.run_pricing()
+    assert updated == 0 and total == 1
+    assert any("kept old price" in note and "0.10" in note for note in stale)
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT last_price_aud FROM item_links WHERE item_id = ?", (item,)
+    ).fetchone()
+    paid = conn.execute(
+        "SELECT last_paid_aud FROM items WHERE id = ?", (item,)
+    ).fetchone()
+    conn.close()
+    assert row["last_price_aud"] == "4.5"  # old price kept
+    assert paid["last_paid_aud"] is None  # last_paid never touched by scraping
+
+
+def test_h6_reasonable_price_change_is_accepted(data_dir, monkeypatch):
+    from ravens_nest import db, pricing, sourcing
+
+    item, _ = _priced_link("4.50")
+    monkeypatch.setattr(
+        pricing, "fetch_url", lambda url: '<meta itemprop="price" content="5.95">'
+    )
+    updated, total, stale = sourcing.run_pricing()
+    assert updated == 1 and stale == []
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT last_price_aud FROM item_links WHERE item_id = ?", (item,)
+    ).fetchone()
+    conn.close()
+    assert row["last_price_aud"] == "5.95"
+
+
+def test_h6_thresholds_configurable_and_first_price_always_accepted(
+    data_dir, monkeypatch
+):
+    from ravens_nest import db, pricing, sourcing, store
+
+    item, supplier = _priced_link("4.50")
+    # Widen the band → the same 0.10 now passes.
+    monkeypatch.setenv("RAVENS_NEST_PRICE_RATIO_MIN", "0.01")
+    monkeypatch.setattr(
+        pricing, "fetch_url", lambda url: '<meta itemprop="price" content="0.10">'
+    )
+    updated, _, _ = sourcing.run_pricing()
+    assert updated == 1
+
+    # A link with NO stored price accepts whatever the page says.
+    monkeypatch.delenv("RAVENS_NEST_PRICE_RATIO_MIN")
+    conn = db.connect()
+    other_supplier = conn.execute(
+        "SELECT id FROM suppliers WHERE name='Jaycar'"
+    ).fetchone()[0]
+    conn.close()
+    store.add_item_link(item, other_supplier, "https://jaycar.example/sg90")
+    monkeypatch.setattr(
+        pricing, "fetch_url", lambda url: '<meta itemprop="price" content="99.00">'
+    )
+    updated, _, _ = sourcing.run_pricing()
+    assert updated >= 1  # nothing to compare against → accepted
+
+
 # ------------------------------------------------------------------ H3
 
 
