@@ -56,13 +56,33 @@
     });
   }
 
+  /* Audit H4: only NETWORK failures are retryable. A 4xx/5xx means the
+   * server received the photo and refused it — queueing that would retry
+   * a permanent failure every 30 seconds forever. */
   function upload(blob) {
     var body = new FormData();
     body.append("photo", blob, "capture.jpg");
-    return fetch("/capture", { method: "POST", body: body }).then(function (resp) {
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      return resp.json();
-    });
+    return fetch("/capture", { method: "POST", body: body }).then(
+      function (resp) {
+        if (!resp.ok) {
+          return resp
+            .json()
+            .catch(function () {
+              return { detail: "HTTP " + resp.status };
+            })
+            .then(function (data) {
+              var err = new Error(data.detail || "HTTP " + resp.status);
+              err.permanent = true; // the server answered: don't retry
+              throw err;
+            });
+        }
+        return resp.json();
+      },
+      function (networkErr) {
+        networkErr.permanent = false; // never reached the server: retry later
+        throw networkErr;
+      }
+    );
   }
 
   function flushQueue() {
@@ -77,8 +97,15 @@
             cursor.delete();
             cursor.continue();
           })
-          .catch(function () {
-            refreshStatus(); // still unreachable — try again later
+          .catch(function (err) {
+            if (err.permanent) {
+              // The server rejected this capture — drop it and tell the user.
+              setStatus("A queued capture was rejected: " + err.message);
+              cursor.delete();
+              cursor.continue();
+            } else {
+              refreshStatus(); // still unreachable — try again later
+            }
           });
       };
     });
@@ -111,10 +138,15 @@
               : "Already captured (" + data.status + ")."
           );
         })
-        .catch(function () {
-          queueCapture(file).then(function () {
-            refreshStatus();
-          });
+        .catch(function (err) {
+          if (err.permanent) {
+            // Server said no (e.g. not a JPEG) — surface it, don't queue.
+            setStatus("Capture rejected: " + err.message);
+          } else {
+            queueCapture(file).then(function () {
+              refreshStatus();
+            });
+          }
         });
     });
   }
