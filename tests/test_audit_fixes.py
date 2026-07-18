@@ -404,6 +404,37 @@ def test_h2_command_need_garbage_qty_is_friendly(data_dir):
     assert QTY_MSG in response.text
 
 
+# ------------------------------------------------------------------ H3
+
+
+def test_h3_vision_client_has_timeout_and_degrades_to_blank_card(data_dir, monkeypatch):
+    import anthropic
+    import httpx
+
+    from ravens_nest import vision
+
+    seen_kwargs = {}
+
+    class SlowClient:
+        def __init__(self, **kwargs):
+            seen_kwargs.update(kwargs)
+            self.messages = self
+
+        def create(self, **kwargs):
+            raise anthropic.APITimeoutError(
+                request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            )
+
+    monkeypatch.setattr(vision.anthropic, "Anthropic", SlowClient)
+    extractions = vision.extract_items(b"\xff\xd8\xff\xe0fake")
+    assert seen_kwargs.get("timeout") == 30.0  # bounded, not the 10-min default
+    assert len(extractions) == 1
+    assert extractions[0]["error"] is not None  # blank card, not a hang
+    assert all(
+        f["value"] is None for f in extractions[0]["fields"].values()
+    )  # nothing invented on the failure path
+
+
 # ------------------------------------------------------------------ H1
 
 

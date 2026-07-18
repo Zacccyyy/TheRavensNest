@@ -105,7 +105,10 @@ def blank_extraction(error: str | None = None) -> dict[str, Any]:
 def _call_model(messages: list[dict[str, Any]]) -> str:
     """One Messages API call; returns the response text. Patched in tests."""
     config.load_env_file()
-    client = anthropic.Anthropic()  # retries 429/5xx with backoff (max_retries=2)
+    # Audit H3: without a timeout the SDK default is 10 minutes — a slow
+    # API would freeze the capture request. Extraction output is small;
+    # 30s is generous, and failure degrades to a blank card anyway.
+    client = anthropic.Anthropic(timeout=30.0)  # retries 429/5xx with backoff
     response = client.messages.create(
         model=config.vision_model(),
         max_tokens=8000,
