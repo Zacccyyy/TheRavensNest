@@ -12,6 +12,41 @@ can see anyone else's data. See [Your data stays yours](#your-data-stays-yours).
 
 ---
 
+## Quick start
+
+You need [uv](https://docs.astral.sh/uv/) (which brings its own Python) and
+git. Install uv if you don't have it:
+
+```sh
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+Then clone, install, and run — same on every platform:
+
+```sh
+git clone https://github.com/Zacccyyy/TheRavensNest.git ravens-nest
+cd ravens-nest
+uv sync
+uv run uvicorn ravens_nest.app:app
+```
+
+Open **<http://127.0.0.1:8000>** and you'll land on the command bar with an
+empty inventory — a banner offers a guided setup (describe your shelving,
+print bin labels, pick suppliers). Type `help` any time for every command.
+
+Photo AI identification is optional; without a key, captures become blank
+cards you fill in by hand. To enable it, copy `.env.example` to `.env` and
+add your [Anthropic API key](https://platform.claude.com/). To use it from
+your phone, see [Phone access](#phone-access-ios-safari--android).
+
+Runs on macOS (Intel & Apple Silicon), Windows, and Linux. Detailed
+walkthrough below.
+
+---
+
 ## What it does
 
 - **Command bar** — the whole interface is one input: search, bin
@@ -54,7 +89,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Get the app
-git clone <this-repo-url> ravens-nest
+git clone https://github.com/Zacccyyy/TheRavensNest.git ravens-nest
 cd ravens-nest
 
 # 3. Install dependencies
